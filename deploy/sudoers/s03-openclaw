@@ -1,0 +1,22 @@
+# /etc/sudoers.d/s03-openclaw（freqtrade 版）—— OpenClaw（系统用户 openclaw）可以执行的全部提权命令。
+# 安装：sudo install -m 0440 -o root -g root s03-openclaw /etc/sudoers.d/ && sudo visudo -cf /etc/sudoers.d/s03-openclaw
+#
+# 原则：只列完整、参数固定的命令，不用通配符；不允许 enable/disable、edit、daemon-reload、reset-failed，
+# 不允许读写 /etc/s03（密钥与 dry_run 开关都在那里）。systemctl status / is-active 不需要 sudo。
+
+Cmnd_Alias S03_SERVICES = \
+    /usr/bin/systemctl start s03-freqtrade.service,  /usr/bin/systemctl stop s03-freqtrade.service,  /usr/bin/systemctl restart s03-freqtrade.service, \
+    /usr/bin/systemctl start s03-ft-monitor.service, /usr/bin/systemctl stop s03-ft-monitor.service, /usr/bin/systemctl restart s03-ft-monitor.service, \
+    /usr/bin/systemctl start s03-ft-gate.service,    /usr/bin/systemctl stop s03-ft-gate.service,    /usr/bin/systemctl restart s03-ft-gate.service
+
+Cmnd_Alias S03_JOBS = \
+    /usr/bin/systemctl start s03-ft-export.service, \
+    /usr/bin/systemctl start s03-events.service
+
+Cmnd_Alias S03_LOGS = \
+    /usr/bin/journalctl -u s03-freqtrade.service -n 200 --no-pager, \
+    /usr/bin/journalctl -u s03-ft-monitor.service -n 200 --no-pager, \
+    /usr/bin/journalctl -u s03-ft-gate.service -n 200 --no-pager
+
+Defaults:openclaw !env_keep, env_reset, secure_path="/usr/sbin:/usr/bin:/sbin:/bin"
+openclaw ALL=(root) NOPASSWD: S03_SERVICES, S03_JOBS, S03_LOGS

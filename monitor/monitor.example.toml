@@ -1,0 +1,25 @@
+# 复制为 monitor/monitor.toml 后修改。密钥一律用环境变量，不写在这里。
+pairs = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT"]
+ws_base = "wss://fstream.binance.com/market/stream"   # 以 Binance 官方公告为准
+ft_api_url = "http://127.0.0.1:8080"
+require_exchange_stop = true
+journal_path = "monitor/var/alerts.jsonl"
+
+[alerts]
+# 全部为示例值，需用回测与 dry-run 数据校准
+shock_sigma = 4.0
+range15_atr_mult = 2.0
+near_stop_r = 0.3
+stop_missing_grace_s = 20
+funding_pctile = 0.95
+funding_abs_floor = 0.0003   # Binance 每 8 小时一期，下限按 0.03%/期（示例值）
+ref_dev_pct = 0.3
+feed_stale_s = 30
+cooldown_s = 900
+max_llm_per_hour = 6
+
+[openclaw]
+enabled = false
+url = "http://127.0.0.1:18789/hooks/agent"
+agent_id = "s03-analyst"
+deliver = true

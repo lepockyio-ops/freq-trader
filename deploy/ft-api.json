@@ -1,0 +1,40 @@
+{
+  "_说明": "复制为 /etc/s03/ft-api.json（root 0644）。api_server 只监听本机，账号等由 /etc/s03/ft-trader.env 注入；internals.sd_notify 配合 systemd 看门狗；webhook 把成交与状态事件推给本机监控进程（127.0.0.1:8766）。删除本行后使用。",
+  "api_server": {
+    "enabled": true,
+    "listen_ip_address": "127.0.0.1",
+    "listen_port": 8080,
+    "verbosity": "error",
+    "enable_openapi": false,
+    "CORS_origins": []
+  },
+  "internals": {
+    "sd_notify": true,
+    "heartbeat_interval": 60
+  },
+  "webhook": {
+    "enabled": true,
+    "url": "http://127.0.0.1:8766/ft-webhook",
+    "format": "json",
+    "retries": 1,
+    "retry_delay": 1,
+    "entry_fill": {
+      "type": "entry_fill",
+      "pair": "{pair}",
+      "open_rate": "{open_rate}",
+      "amount": "{amount}",
+      "enter_tag": "{enter_tag}"
+    },
+    "exit_fill": {
+      "type": "exit_fill",
+      "pair": "{pair}",
+      "exit_reason": "{exit_reason}",
+      "profit_amount": "{profit_amount}",
+      "close_rate": "{close_rate}"
+    },
+    "status": {
+      "type": "status",
+      "status": "{status}"
+    }
+  }
+}

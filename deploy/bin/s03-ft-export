@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""把 freqtrade 的交易记录、盈亏统计和监控告警导出为只读副本，供 s03-review 复盘。安装到 /usr/local/lib/s03/s03-ft-export。
+
+  s03-ft-export <输出目录>
+
+只调用 freqtrade REST API 的 GET 接口；账号从环境变量 FT_API_USER / FT_API_PASS 读取。
+导出内容不含余额明细以外的账户信息，不含任何密钥。
+"""
+import base64
+import json
+import os
+import shutil
+import sys
+import urllib.request
+
+API = os.environ.get("FT_API_URL", "http://127.0.0.1:8080").rstrip("/") + "/api/v1/"
+ALERTS = os.environ.get("S03_ALERTS_JOURNAL", "/var/lib/s03-ft/monitor/var/alerts.jsonl")
+
+
+def get(path):
+    req = urllib.request.Request(API + path)
+    user, pw = os.environ.get("FT_API_USER"), os.environ.get("FT_API_PASS")
+    if user and pw:
+        req.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode())
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read().decode())
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print(__doc__)
+        return 2
+    out = sys.argv[1]
+    os.makedirs(out, exist_ok=True)
+    for name, path in (("trades", "trades?limit=500"), ("profit", "profit"), ("daily", "daily?timescale=30"),
+                       ("status", "status"), ("locks", "locks")):
+        try:
+            data = get(path)
+        except Exception as e:
+            data = {"error": type(e).__name__}
+        with open(os.path.join(out, f"ft_{name}.json"), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+    if os.path.exists(ALERTS):
+        shutil.copyfile(ALERTS, os.path.join(out, "alerts.jsonl"))
+    events = os.environ.get("S03_EVENTS_FILE", "/var/lib/s03-events/events.json")
+    if os.path.exists(events):
+        shutil.copyfile(events, os.path.join(out, "events.json"))
+    # 复盘指标由程序计算（monitor/review_metrics.py），复盘 agent 只读结果
+    sys.path.insert(0, os.environ.get("S03_FT_MONITOR_DIR", "/opt/s03/ft-s03/monitor"))
+    try:
+        from review_metrics import compute, from_freqtrade, to_markdown
+
+        with open(os.path.join(out, "ft_trades.json"), encoding="utf-8") as f:
+            tr = json.load(f)
+        m = compute(from_freqtrade(tr.get("trades", []) if isinstance(tr, dict) else []))
+        with open(os.path.join(out, "metrics.json"), "w", encoding="utf-8") as f:
+            json.dump(m, f, ensure_ascii=False, indent=1)
+        with open(os.path.join(out, "metrics.md"), "w", encoding="utf-8") as f:
+            f.write(to_markdown(m, "S-03 复盘指标（freqtrade，最近 500 笔）"))
+    except Exception as e:                       # 指标失败不影响导出
+        with open(os.path.join(out, "metrics.json"), "w", encoding="utf-8") as f:
+            json.dump({"error": type(e).__name__}, f)
+    for root, _, files in os.walk(out):
+        for fn in files:
+            os.chmod(os.path.join(root, fn), 0o640)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

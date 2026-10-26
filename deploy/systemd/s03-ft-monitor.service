@@ -1,0 +1,37 @@
+[Unit]
+Description=S-03 行情监控与告警（Binance WebSocket；不需要交易所密钥，不消耗 LLM token）
+After=network-online.target s03-freqtrade.service
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+OnFailure=s03-notify-ops@%n.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=120
+User=s03trader
+Group=s03trader
+WorkingDirectory=/var/lib/s03-ft
+StateDirectory=s03-ft
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/s03/ft-monitor.env
+EnvironmentFile=/etc/s03/openclaw-hooks.env
+ExecStart=/opt/s03/venv/bin/python /opt/s03/ft-s03/monitor/run_monitor.py alerts -c /etc/s03/monitor.toml
+Restart=always
+RestartSec=10
+ReadWritePaths=/var/lib/s03-ft
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

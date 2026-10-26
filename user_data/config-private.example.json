@@ -1,0 +1,17 @@
+{
+  "exchange": {
+    "key": "在你本机填写：只开交易权限、关闭提币、绑定服务器 IP",
+    "secret": "在你本机填写"
+  },
+  "api_server": {
+    "enabled": true,
+    "username": "改成你自己的",
+    "password": "改成强密码",
+    "jwt_secret_key": "随机长字符串"
+  },
+  "telegram": {
+    "enabled": false,
+    "token": "",
+    "chat_id": ""
+  }
+}

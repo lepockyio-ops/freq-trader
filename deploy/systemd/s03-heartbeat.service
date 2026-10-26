@@ -1,0 +1,19 @@
+[Unit]
+Description=S-03 外部心跳：检查服务状态与 freqtrade /ping 并报到
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+EnvironmentFile=/etc/s03/heartbeat.env
+ExecStart=/usr/local/lib/s03/s03-heartbeat s03-freqtrade.service s03-ft-monitor.service s03-ft-gate.service --ping-url http://127.0.0.1:8080/api/v1/ping
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0027
