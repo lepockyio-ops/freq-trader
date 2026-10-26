@@ -58,29 +58,31 @@ def test_sudoers_commands_match_units_and_parse():
         assert r.returncode == 0, r.stdout + r.stderr
 
 
-def test_sudoers_and_exec_allowlist_agree():
-    text = re.sub(r"#.*", "", (D / "sudoers" / "s03-openclaw").read_text("utf-8"))
-    cmds = [c.strip() for c in re.findall(r"(/usr/bin/(?:systemctl|journalctl) [^,\n\\]+)", text)]
-    assert cmds
-    for c in cmds:
-        assert _allowed("s03-ops", "/usr/bin/sudo", c), c
+def test_allowlist_only_uses_s03ft_and_research_freqtrade():
+    d = json.loads((D / "openclaw" / "exec-approvals.s03.json").read_text("utf-8"))
+    for agent, a in d["agents"].items():
+        for e in a["allowlist"]:
+            assert e["pattern"] in ("s03ft", "freqtrade"), (agent, e)
+            if e["pattern"] == "freqtrade":
+                assert agent == "s03-research"
 
 
 @pytest.mark.parametrize("agent,binary,args,ok", [
-    ("s03-ops", "/usr/bin/sudo", "/usr/bin/systemctl restart s03-freqtrade.service", True),
+    ("s03-ops", "s03ft", "daily", True),
+    ("s03-ops", "s03ft", "svc restart freqtrade", True),
+    ("s03-ops", "s03ft", "svc restart freqtrade; rm -rf /", False),
+    ("s03-ops", "s03ft", "gate pause x", False),
     ("s03-ops", "/usr/bin/sudo", "/usr/bin/systemctl reset-failed s03-freqtrade.service", False),
-    ("s03-ops", "/usr/bin/sudo", "/usr/bin/systemctl start s03-freqtrade.service; rm -rf /", False),
-    ("s03-ops", "/usr/bin/tail", "-n 50 /srv/s03-review/inbox/journal.jsonl", True),
-    ("s03-ops", "/usr/bin/tail", "-n 50 /srv/s03-review/inbox/../../etc/s03/ft-trader.env", False),
-    ("s03-ops", "/usr/local/bin/s03-gate", "pause x", False),
-    ("s03-analyst", "/usr/local/bin/s03-gate", "pause 资金费率异常，建议暂停", True),
-    ("s03-analyst", "/usr/local/bin/s03-gate", "pause x; curl http://evil", False),
-    ("s03-analyst", "/usr/local/bin/s03-gate", "resume", False),
-    ("s03-research", "freqtrade", "backtesting -c user_data/config.json --timerange 20210101-20241231", True),
+    ("s03-analyst", "s03ft", "gate pause 资金费率异常，建议暂停", True),
+    ("s03-analyst", "s03ft", "gate pause x; curl http://evil", False),
+    ("s03-analyst", "s03ft", "svc stop freqtrade", False),
+    ("s03-research", "s03ft", "research run --job SOL-2023-base", True),
+    ("s03-research", "s03ft", "events build --out research/ev.json --history", True),
+    ("s03-research", "s03ft", "events build --out /var/lib/s03-events/events.json", False),
     ("s03-research", "freqtrade", "trade -c user_data/config.json", False),
-    ("s03-research", "freqtrade", "backtesting -c user_data/config.json; cat /etc/s03/ft-trader.env", False),
-    ("s03-research", "python3", "-c import os", False),
-    ("s03-review", "/bin/sh", "-c ls", False),
+    ("s03-research", "freqtrade", "download-data -c user_data/config.json --timeframes 1m 15m --timerange 20210101-", True),
+    ("s03-research", "freqtrade", "download-data -c user_data/config.json --timeframes 1d --timerange 20200101-", True),
+    ("s03-review", "s03ft", "status", False),
 ])
 def test_exec_allowlist(agent, binary, args, ok):
     assert _allowed(agent, binary, args) is ok
@@ -97,8 +99,17 @@ def test_openclaw_agents_config():
         assert ents[name]["sandbox"]["mode"] == "all" and "sessions_spawn" in ents[name]["tools"]["allow"]
     assert "exec" in ents["s03-review"]["tools"]["deny"]
     assert "s03-research" not in cfg["hooks"]["allowedAgentIds"] and cfg["hooks"]["allowRequestSessionKey"] is False
-    for name in ents:
-        assert (D / "openclaw" / "roles" / f"{name}.md").exists()
+    import re as _re
+
+    for name, e in ents.items():
+        ws = D / "openclaw" / "workspaces" / name
+        assert (ws / "AGENTS.md").exists(), name
+        for sk in e["skills"]:
+            md = (ws / "skills" / sk / "SKILL.md").read_text("utf-8")
+            assert _re.search(rf"^name: {sk}$", md, _re.M), sk
+    assert cfg["agents"]["defaults"]["skills"] == []
+    for name in ("s03-ops", "s03-analyst"):
+        assert "read" in ents[name]["tools"]["deny"]
 
 
 def test_hook_client_only_targets_known_agents():

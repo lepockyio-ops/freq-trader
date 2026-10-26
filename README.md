@@ -1,5 +1,7 @@
 # S-03 freqtrade 策略（Binance USDⓈ-M 永续 · 只做多 · 实现 A）
 
+> **交给 OpenClaw 直接执行：见 [OPENCLAW.md](OPENCLAW.md)。** 一键部署 `sudo bash deploy/install.sh`，agent 通过统一命令 `s03ft` 操作。
+
 对应《freqtrade 交易流程手册》v0.2。交易风格与原生版一致（R1–R6 日线筛选、支撑区、下探回升后突破前一根
 15 分钟高点入场、0.5% 风险、3R/5R 分批、9 日 EMA 追踪）。默认 `dry_run = true`，不会下真实订单。
 已在 freqtrade 2026.9 上加载、回测并做过前视偏差检查。所有阈值是示例值，不代表策略有效。

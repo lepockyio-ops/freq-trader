@@ -1,5 +1,7 @@
 # 部署：整套流程由 OpenClaw agent 启动和运行（freqtrade 版）
 
+> v1.0 起推荐直接运行 `sudo bash deploy/install.sh`（一键完成下面第 1–6 步，可重复运行、不覆盖已有密钥），再看根目录 OPENCLAW.md。下面的手动步骤保留作参考。
+
 对应《freqtrade 交易流程手册》第 13 节。原则与 Hyperliquid 版相同：**agent 负责操作，freqtrade 与监控程序负责交易决策和监控**。
 权限靠操作系统隔离（独立用户、sudoers、文件权限、沙箱），不靠 OpenClaw 的命令审批。
 
@@ -70,7 +72,7 @@ set -a; . /etc/s03/ft-trader.env; set +a
 sudo -u s03trader -E /opt/s03/venv/bin/freqtrade show-config -c /etc/s03/ft-config.json -c /etc/s03/ft-api.json --userdir /var/lib/s03-ft/user_data > /dev/null && echo 配置可用
 
 # 7. OpenClaw：合并 deploy/openclaw/openclaw.s03.json5，导入 exec-approvals.s03.json，
-#    把 roles/*.md 放到各自工作区的 AGENTS.md，然后 openclaw doctor
+#    工作区：deploy/openclaw/workspaces/<agent>/（AGENTS.md + skills/），然后 openclaw doctor
 ```
 
 首次启动由你执行 `systemctl start s03-freqtrade s03-ft-gate s03-ft-monitor`，确认正常后，日常启停才交给 s03-ops。

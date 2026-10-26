@@ -1,13 +1,12 @@
-// OpenClaw 配置片段：4 个 S-03 agent 与 hooks。合并进你的 OpenClaw 配置后，用 `openclaw doctor` 检查。
-// 键名来自官方文档（2026-10-26 查阅：webhooks、multi-agent-sandbox-tools、subagents）。
-// 你的版本若键名不同，以官方文档为准；标了“核对”的地方我没能在文档里找到确切写法。
+// OpenClaw 配置片段（freqtrade 版 v1.0）：4 个 S-03 agent、各自的技能白名单、hooks。
+// 合并进你的 OpenClaw 配置后运行 `openclaw doctor`。键名来自官方文档（2026-10-26 查阅：webhooks、
+// multi-agent-sandbox-tools、subagents、skills）；标了“核对”的地方请按你的版本确认。
 {
   hooks: {
     enabled: true,
     token: "<与 /etc/s03/openclaw-hooks.env 中 OPENCLAW_HOOKS_TOKEN 相同的专用随机串>",
     path: "/hooks",
-    // 只有这三个 agent 能被 webhook 唤醒；s03-research 只由你手动发起
-    allowedAgentIds: ["s03-analyst", "s03-ops", "s03-review"],
+    allowedAgentIds: ["s03-analyst", "s03-ops", "s03-review"],   // s03-research 只由你手动发起
     allowRequestSessionKey: false,
   },
 
@@ -15,53 +14,50 @@
     ownership: "explicit",
     defaults: {
       sandbox: { mode: "off" },
-      subagents: {
-        model: "<便宜的模型 id>",          // 子 agent 用便宜模型；主 agent 用你的默认模型
-        runTimeoutSeconds: 1800,
-        maxConcurrent: 4,
-        // 嵌套层级：只允许 1 层（主 agent → 子 agent），设置方法见官方 subagents/nesting 文档（核对）
-      },
+      skills: [],                                   // 默认不给任何技能；每个 agent 单独列出
+      subagents: { model: "<便宜的模型 id>", runTimeoutSeconds: 1800, maxConcurrent: 4 },
     },
     entries: {
-      // 1) 运维：启动、停止、重启 s03 服务，巡检，日报，导出。不派生子 agent。
+      // 运维：全部操作经 s03ft；不需要读文件（s03ft 输出已包含所需数据），所以连 read 也关掉
       "s03-ops": {
         name: "S03 运维",
-        workspace: "~/.openclaw/workspace-s03-ops",   // 放 roles/s03-ops.md（作为该工作区的 AGENTS.md）
-        sandbox: { mode: "off" },                      // 需要在主机上调用 sudo systemctl；能力由 sudoers 白名单限定
-        tools: {
-          allow: ["exec", "read", "message"],
-          deny: ["write", "edit", "apply_patch", "process", "browser", "gateway", "sessions_spawn"],
-        },
-      },
-
-      // 2) 告警分析：由监控进程的告警唤醒；只能查状态和暂停新开仓。不派生子 agent。
-      "s03-analyst": {
-        name: "S03 告警分析",
-        workspace: "~/.openclaw/workspace-s03-analyst",
-        sandbox: { mode: "off" },                      // 需要调用主机上的 /usr/local/bin/s03-gate
+        workspace: "~/.openclaw/workspace-s03-ops",          // 内容来自 deploy/openclaw/workspaces/s03-ops
+        sandbox: { mode: "off" },                            // 需要调用主机上的 s03ft（其中的 sudo 受 sudoers 限定）
+        skills: ["s03ft-ops"],
         tools: {
           allow: ["exec", "message"],
           deny: ["read", "write", "edit", "apply_patch", "process", "browser", "gateway", "sessions_spawn"],
         },
       },
-
-      // 3) 研究：回测、偏差检查、机器学习验证；可派生子 agent 并行。只在沙箱里的研究副本中工作，无任何密钥。
+      // 告警分析：只能 s03ft gate status / pause
+      "s03-analyst": {
+        name: "S03 告警分析",
+        workspace: "~/.openclaw/workspace-s03-analyst",
+        sandbox: { mode: "off" },
+        skills: ["s03ft-alert"],
+        tools: {
+          allow: ["exec", "message"],
+          deny: ["read", "write", "edit", "apply_patch", "process", "browser", "gateway", "sessions_spawn"],
+        },
+      },
+      // 研究：沙箱内的研究副本；可派生子 agent。沙箱镜像需装好 s03ft 与 freqtrade 2026.9（核对）
       "s03-research": {
         name: "S03 研究",
         workspace: "/srv/s03-research",
-        sandbox: { mode: "all", scope: "agent", workspaceAccess: "rw" },  // 沙箱镜像需装好 freqtrade 2026.9 与依赖（核对）
+        sandbox: { mode: "all", scope: "agent", workspaceAccess: "rw" },
+        skills: ["s03ft-research"],
         tools: {
           allow: ["read", "write", "edit", "exec", "sessions_spawn"],
           deny: ["process", "browser", "gateway", "message"],
         },
-        subagents: { model: "<便宜的模型 id>", allowAgents: ["s03-research"] },   // allowAgents 的取值格式（核对）
+        subagents: { model: "<便宜的模型 id>", allowAgents: ["s03-research"] },   // allowAgents 取值格式（核对）
       },
-
-      // 4) 复盘：读 inbox 里的日志副本，写周报草稿；可派生子 agent（每个币一个 + 风控、成本角色）。不执行命令。
+      // 复盘：读 inbox 副本、写周报草稿；可派生子 agent；不执行命令
       "s03-review": {
         name: "S03 复盘",
         workspace: "/srv/s03-review",
         sandbox: { mode: "all", scope: "agent", workspaceAccess: "rw" },
+        skills: ["s03ft-review"],
         tools: {
           allow: ["read", "write", "sessions_spawn", "message"],
           deny: ["exec", "process", "edit", "apply_patch", "browser", "gateway"],
