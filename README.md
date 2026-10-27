@@ -1,72 +1,120 @@
-# freq-trader：freqtrade 自动交易框架（Binance USDⓈ-M 永续 · 策略留空，可接入任意策略）
+# freq-trader-framework
 
-> **交给 OpenClaw 直接执行：见 [OPENCLAW.md](OPENCLAW.md)。** 一键部署 `sudo bash deploy/install.sh`，agent 通过统一命令 `s03ft` 操作。
+基于 **freqtrade 的 Binance USDⓈ-M 永续交易框架**。v2.0 将交易规则与执行、风控、监控和运维分开，供你接入自己的做多策略。
 
-v2.0 起，这是一个**不含交易策略的框架**：止损护栏、仓位与杠杆、事件窗口、总风险与相关性、交易所端止损、
-Protections、监控告警、官方事件日历、复盘指标、研究矩阵、OpenClaw 运维与一键部署都已就绪；交易规则由你写成一个
-继承 `FrameworkStrategy` 的 freqtrade 策略接入。默认策略是空白模板 `MyStrategy`：可以运行，但不会产生任何入场。
-原先的 S-03 策略保留在 git 历史中（v1.x）。默认 `dry_run = true`。需要 freqtrade 2026.9。
+默认策略为 `MyStrategy` 空白模板，**不会产生入场信号**；默认配置 `dry_run: true`。均线示例仅用于检查框架流程，收益表现需要另行验证。仓库中的 `s03` / `s03ft` 是沿用的包名、命令和服务名。
 
-## 接入你的策略（3 步）
+## 文档入口
 
-1. 按 `docs/STRATEGY_TEMPLATE.md` 写好策略规格（适用市场、信号、止损、仓位、离场、验证门槛）。
-2. 修改 `user_data/strategies/MyStrategy.py`：设置 `timeframe`；在 `populate_entry_trend()` 写 `enter_long = 1` 和
-   `fw_stop`（绝对止损价）；按需实现 `take_profit_legs()`、`strategy_exit()`；删掉 `is_template = True`。
-   改了类名就同步修改 `user_data/config.json` 的 `"strategy"`。
-3. `pytest -q` → `s03ft research plan/run/aggregate`（研究矩阵）→ `s03ft research g0`（偏差检查）→ 按 G1–G9 逐级上线。
+- [v2.0 中文完整手册](%E4%BA%A4%E6%98%93%E6%A1%86%E6%9E%B6%E6%A8%A1%E6%9D%BF%E6%89%8B%E5%86%8C%EF%BC%88freqtrade%20%C2%B7%20%E7%AD%96%E7%95%A5%E7%95%99%E7%A9%BA%20v2.0%EF%BC%89.md)：交易流程、数据、验证门槛、风险与运维。
+- [框架说明](docs/FRAMEWORK.md)：框架与策略各自负责什么。
+- [策略规格模板](docs/STRATEGY_TEMPLATE.md)：编写策略前先明确规则、参数来源与验收标准。
+- [部署说明](deploy/README.md)：Linux 服务、权限、监控与密钥配置。
+- [OpenClaw 操作入口](OPENCLAW.md)：部署和日常命令。
 
-框架说明见 `docs/FRAMEWORK.md`。示例 `examples/strategies/SmaCrossExample.py` 只用于验证框架能跑通，不代表可交易：
-`freqtrade backtesting -c user_data/config.json --strategy SmaCrossExample --strategy-path examples/strategies`
+## 框架提供什么
 
-## 文件
-
-| 路径 | 作用 |
+| 模块 | 内容 |
 | --- | --- |
-| `user_data/strategies/framework_base.py` | **框架基类** `FrameworkStrategy`：止损护栏、仓位、杠杆、入场前检查、交易所端止损、分批、最长持有、Protections |
-| `user_data/strategies/MyStrategy.py` | **空白策略模板**（默认） |
-| `examples/strategies/SmaCrossExample.py` | 示例策略（只用于验证框架） |
-| `docs/STRATEGY_TEMPLATE.md`、`docs/FRAMEWORK.md` | 策略规格填写模板、框架说明 |
-| `user_data/config.json` | Binance 期货、逐仓、最多 3 笔、交易所端市价止损、dry_run、`"strategy"` |
-| `user_data/config-private.example.json` | 密钥与 API 服务器模板（本地调试用） |
-| `user_data/config-test-okx.json` | 测试环境用的 OKX 配置（你用不到） |
-| `monitor/` | 行情监控与告警、白名单代理、官方事件日历、复盘指标 |
-| `research/matrix.py` | 研究矩阵（策略名读配置或 `FW_STRATEGY`） |
-| `s03ft/` | 给 OpenClaw agent 的统一命令行 |
-| `deploy/` | 一键部署、systemd、sudoers、4 个 agent 的工作区与技能 |
-| `tests/` | 53 个测试：框架护栏（随机性质测试）、空白模板、示例策略、freqtrade 实际回测、监控、部署、命令行 |
+| 策略基类 | `FrameworkStrategy`：策略接入接口、止损护栏、仓位与杠杆计算、入场检查 |
+| 风险与执行 | 总在险风险、相关性检查、事件窗口、交易所端止损、分批止盈、最长持有与 Protections |
+| 监控 | 行情、持仓、资金费率、参考价和数据中断告警；本机状态与暂停代理 |
+| 研究 | 按交易对、年份和方案拆分回测，重跑复核、汇总与前视/递归偏差检查 |
+| 事件与复盘 | 美联储、BLS、BEA 事件日历；程序计算复盘指标 |
+| 运维 | `s03ft` 命令、systemd 服务、安装脚本和 OpenClaw 工作区模板 |
 
-## 测试环境里已验证（2026-10-27，OKX 永续数据代替 Binance）
+## 本地安装
 
-| 项目 | 结果 |
-| --- | --- |
-| 空白模板回测（SOL、BTC，2026-10-05 至 10-26） | 正常运行，0 笔交易 |
-| 示例策略回测（同上） | 7 笔，全部为止损离场；单笔亏损约 34–37 USDT（风险预算 50）；止损按价格挂出 |
-| 框架护栏随机测试 | 止损距离、强平距离、风险预算三条规则在数千组随机输入下都成立 |
+以下命令使用 Linux / macOS 的 Bash。正式部署需要 Linux 与 systemd。
 
-示例结果只说明框架能跑通，不说明示例策略有效。
+仓库的命令行包要求 Python ≥ 3.11；freqtrade 部分固定依赖 `2026.9`，完整交易环境建议按手册使用 Python 3.12+。
 
-## 行情监控与告警
+```bash
+git clone https://github.com/lepockyio-ops/freq-trader-framework.git
+cd freq-trader-framework
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[trade,test]"
+python -m pytest -q
+```
+
+测试覆盖框架、模板、命令行、监控、事件和部署。涉及 freqtrade 或回测数据的测试，请按测试自身要求准备依赖和数据；测试通过也不等于策略有效。
+
+## 接入你的策略
+
+1. 填写[策略规格模板](docs/STRATEGY_TEMPLATE.md)，确定市场条件、信号、止损、仓位、离场和验证标准。
+2. 修改 [MyStrategy.py](user_data/strategies/MyStrategy.py)，继承 [FrameworkStrategy](user_data/strategies/framework_base.py)：
+   - 用 `populate_indicators()` 计算指标。
+   - 用 `populate_entry_trend()` 设置 `enter_long` 和绝对止损价 `fw_stop`，可选 `fw_entry_cap` 限定计划入场价。
+   - 按需实现 `take_profit_legs()`、`strategy_exit()` 或 `populate_exit_trend()`。
+3. 完成规则后移除 `is_template = True` 或设为 `False`。若更换类名，同步修改 `user_data/config.json` 的 `strategy`。
+4. 核对策略周期与配置：模板类使用 `15m`，当前配置文件写的是 `1m`，运行前应按策略需求统一。
+5. 完成测试、数据准备、回测和偏差检查，再进入 dry-run 验证。
+
+[均线示例](examples/strategies/SmaCrossExample.py)可用于了解接口。准备所需历史数据后，可单独回测：
+
+```bash
+freqtrade backtesting -c user_data/config.json \
+  --strategy SmaCrossExample --strategy-path examples/strategies
+```
+
+## 研究与验证
+
+在仓库根目录执行；先准备对应市场、周期和时间范围的历史数据。下面的 `--job` 是矩阵任务编号示例。
+
+```bash
+s03ft research plan --pairs BTC,ETH,SOL,BNB --years 2022-2025 --variants base,stop_floor,cost2x
+s03ft research run --job SOL-2023-base
+s03ft research verify --job SOL-2023-base
+s03ft research aggregate
+s03ft research g0 --timerange 20250101-
+```
+
+策略名默认读取 `user_data/config.json`；也可用 `FW_STRATEGY`、`FW_STRATEGY_PATH` 指定策略与路径，用 `S03_FT_CONFIG` 指定配置。
+
+验证按手册的 G0–G9 推进，包括偏差检查、样本量、样本外与滚动验证、参数稳健性、成本压力、极端情景、代码一致性和模拟运行。实盘是独立阶段，需要人工授权。
+
+## 监控与部署
+
+本地监控配置从 [monitor.example.toml](monitor/monitor.example.toml) 复制，并配置 freqtrade API 账号：
 
 ```bash
 cp monitor/monitor.example.toml monitor/monitor.toml
-export FT_API_USER=... FT_API_PASS=...          # freqtrade api_server 账号，只给监控进程
-python monitor/run_monitor.py alerts            # Binance WebSocket 盯盘，按阈值告警；不消耗 LLM token
-python monitor/run_monitor.py gate              # OpenClaw 白名单代理（127.0.0.1:8765）：GET /status、POST /pause
+python monitor/run_monitor.py alerts
+# 在另一个终端运行本机代理
+python monitor/run_monitor.py gate
 ```
 
-- 告警核心 `monitor/alerts_core.py` 与 Hyperliquid 版 `s03/alerts/core.py` 是同一份代码。
-- 告警只在触发时交给 OpenClaw（官方 webhook `/hooks/agent`），每小时最多 6 次（示例值），critical 不占额度。
-- OpenClaw 唯一能做的动作是经代理调用 freqtrade 的 `/stopentry`（只停新开仓）。它拿不到 freqtrade API 账号和交易所密钥。
-- `[openclaw] enabled` 默认为 false；打开前设置 `OPENCLAW_HOOKS_TOKEN` 和 `OPENCLAW_GATE_TOKEN`。
-- 未测：测试环境连不上 Binance，WebSocket 地址（`/market/stream`）和 REST 预热需在你本机确认；
-  dry-run 下 freqtrade 是否在 `/status` 的 orders 里显示模拟止损单也要确认，否则把 `require_exchange_stop` 设为 false。
+告警分析可选接入 OpenClaw，默认关闭。告警分析端经代理可查看状态、暂停新开仓；运维角色的启停权限由 systemd、sudoers 和工作区配置限定。密钥按部署文档在本机配置，勿提交到 Git。
 
-## 已知问题
+Linux 服务器部署入口：
 
-- **护栏按计划入场价检查**：实际成交价不高于 `fw_entry_cap`，按成交价算的止损距离可能略小于下限（至多差一个限价偏移）。
-- **复盘 R 的口径（v2.0 修正）**：R 用 `stop_loss_abs` 计算。v1.x 用的是 `initial_stop_loss_abs`（兜底的 −99% 止损），会把 R 算得过小；v2.0 已改正。
-- **维持保证金率**：杠杆公式用的是 `framework_base.FW_DEFAULTS` 里的估计值，上线前用 Binance 的杠杆档位表核对。
-- **资金费率与参考价**只在监控进程里告警，入场前不检查；需要的话在你的策略里加条件。
-- **前视偏差**：每个新策略都要跑 `s03ft research g0`（lookahead-analysis + recursive-analysis）。
+```bash
+sudo bash deploy/install.sh
+s03ft doctor --json
+s03ft status --json
+```
 
-本代码是研究与流程工具，不构成投资建议，不保证收益。
+安装脚本要求已存在 OpenClaw 用户，可用 `--openclaw-user` 指定。它安装代码、服务与定时任务，生成缺失配置和 token；交易所密钥、OpenClaw 主配置合并和交易服务启动仍需按[部署说明](deploy/README.md)完成。
+
+## 目录导航
+
+| 路径 | 用途 |
+| --- | --- |
+| [user_data/strategies/](user_data/strategies/) | 框架基类与空白策略 |
+| [user_data/config.json](user_data/config.json) | Binance 逐仓期货、默认策略与 dry-run 配置 |
+| [examples/strategies/](examples/strategies/) | 示例策略 |
+| [monitor/](monitor/) | 监控、代理、事件日历与复盘指标 |
+| [research/matrix.py](research/matrix.py) | 回测矩阵与偏差检查 |
+| [s03ft/](s03ft/) | 统一命令行 |
+| [deploy/](deploy/) | 安装、服务、权限与 OpenClaw 模板 |
+| [tests/](tests/) | 测试与离线日历样本 |
+
+## 使用边界
+
+- 当前模板面向做多策略。风险阈值是待校准的配置起点，不能替代策略验证。
+- 止损护栏按计划入场价检查；实际成交价格会影响最终止损距离。
+- 杠杆计算中的维持保证金率估计应与交易所档位核对；资金费与参考价告警不等于策略入场过滤。
+- Binance 行情连接、API 返回的止损状态和交易所端订单行为仍需在目标环境验证。
+- 本仓库提供研究与执行工具，不保证策略收益。
