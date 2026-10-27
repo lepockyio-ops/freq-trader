@@ -56,7 +56,7 @@ def main() -> int:
         with open(os.path.join(out, "metrics.json"), "w", encoding="utf-8") as f:
             json.dump(m, f, ensure_ascii=False, indent=1)
         with open(os.path.join(out, "metrics.md"), "w", encoding="utf-8") as f:
-            f.write(to_markdown(m, "S-03 复盘指标（freqtrade，最近 500 笔）"))
+            f.write(to_markdown(m, "S03 复盘指标（freqtrade，最近 500 笔）"))
     except Exception as e:                       # 指标失败不影响导出
         with open(os.path.join(out, "metrics.json"), "w", encoding="utf-8") as f:
             json.dump({"error": type(e).__name__}, f)

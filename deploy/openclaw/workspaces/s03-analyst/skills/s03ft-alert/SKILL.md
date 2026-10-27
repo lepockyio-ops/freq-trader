@@ -1,10 +1,10 @@
 ---
 name: s03ft-alert
-description: S-03 告警分析：读取状态、按固定条件决定是否暂停新开仓、用固定格式回复。
+description: S03 告警分析：读取状态、按固定条件决定是否暂停新开仓、用固定格式回复。
 metadata: { "openclaw": { "requires": { "bins": ["s03ft"] } } }
 ---
 
-# S-03 告警分析技能
+# S03 告警分析技能
 
 ## 可用命令（只有这两条）
 - `s03ft gate status`：运行状态、持仓、交易所端止损是否在场、最近告警。

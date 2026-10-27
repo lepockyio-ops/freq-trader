@@ -1,13 +1,15 @@
-# 交给 OpenClaw 直接执行：落地指南（freq-trader v1.0）
+# 交给 OpenClaw 直接执行：落地指南（freq-trader v2.0 · 策略留空）
 
-这个仓库是一套可直接部署、由 OpenClaw agent 操作的库。原则：**agent 通过一个命令 `s03ft` 操作一切；交易决策只由 freqtrade + S03Strategy 完成；上线、恢复、改参数只由你操作。**
+这个仓库是一套可直接部署、由 OpenClaw agent 操作的库。原则：**agent 通过一个命令 `s03ft` 操作一切；交易决策只由 freqtrade 里你接入的策略完成；上线、恢复、改参数只由你操作。**
+
+> 默认策略是空白模板 `MyStrategy`：整套流程可以部署和运行，但不会产生任何入场。接入策略见 `docs/STRATEGY_TEMPLATE.md` 与 README。
 
 ## 组成
 
 | 部分 | 位置 | 作用 |
 | --- | --- | --- |
 | 命令行库 `s03ft` | `s03ft/`、`pyproject.toml` | agent 唯一使用的命令：自检、状态、每日例行、启停服务、日志、暂停新开仓、事件日历、研究矩阵、复盘指标、测试；输出 JSON |
-| 策略 | `user_data/strategies/S03Strategy.py` | 交易决策（实现 A：1 分钟触发；0.5% 风险；3R / 5R 分批；9 日 EMA 离场） |
+| 策略 | `user_data/strategies/framework_base.py`、`MyStrategy.py` | 框架基类（风控与执行）+ 你的策略（默认空白模板） |
 | 监控与代理 | `monitor/` | Binance WebSocket 告警、freqtrade webhook 接收、OpenClaw 白名单代理、官方事件日历、复盘指标 |
 | 研究 | `research/matrix.py` | 回测矩阵、复核、G0 |
 | 部署 | `deploy/install.sh`、`deploy/systemd/`、`deploy/sudoers/` | 一键部署、服务、看门狗、心跳、提权白名单 |

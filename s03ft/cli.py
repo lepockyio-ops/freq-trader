@@ -1,4 +1,4 @@
-"""s03ft：S-03 freqtrade 流程的统一命令行（OpenClaw agent 通过它执行全部操作）。
+"""s03ft：S03 freqtrade 流程的统一命令行（OpenClaw agent 通过它执行全部操作）。
 
   s03ft doctor [--json]                       环境自检（部署后、每日例行都可运行）
   s03ft status [--json]                       服务状态、代理状态、事件文件新鲜度、最新复盘指标
@@ -155,6 +155,31 @@ def alerts_24h(inbox: Path = INBOX) -> dict:
 
 
 # ---------------------------------------------------------------------- 子命令
+def strategy_info(research: bool = False) -> dict:
+    """读取配置里的策略名，找到策略文件，判断是否仍是空白模板（is_template = True）。"""
+    cfg_paths = [HOME / "user_data" / "config.json"] if research else [Path("/etc/s03/ft-config.json"),
+                                                                       HOME / "user_data" / "config.json"]
+    name = os.environ.get("FW_STRATEGY")
+    for p in cfg_paths:
+        if name:
+            break
+        try:
+            name = json.loads(p.read_text("utf-8")).get("strategy")
+        except (OSError, ValueError):
+            continue
+    name = name or "MyStrategy"
+    found = None
+    for d in (HOME / "user_data" / "strategies", HOME / "examples" / "strategies"):
+        for f in d.glob("*.py") if d.exists() else []:
+            if f"class {name}(" in f.read_text("utf-8", errors="ignore"):
+                found = f
+                break
+        if found:
+            break
+    is_tpl = bool(found) and "is_template = True" in found.read_text("utf-8", errors="ignore")
+    return {"name": name, "file": str(found) if found else None, "is_template": is_tpl}
+
+
 def cmd_doctor(a) -> int:
     checks = []
 
@@ -167,8 +192,10 @@ def cmd_doctor(a) -> int:
         add("freqtrade 已安装且为 2026.9", ftv == "2026.9", ftv)
     except ImportError:
         add("freqtrade 已安装且为 2026.9", a.research, "未安装（运维与告警 agent 不需要）")
-    strat = HOME / "user_data" / "strategies" / "S03Strategy.py"
-    add("策略文件存在", strat.exists(), str(strat))
+    info = strategy_info(research=a.research)
+    add("策略文件存在", info["file"] is not None, info.get("file") or f"找不到策略 {info['name']}")
+    add("已配置自己的策略（不是空白模板）", info["file"] is not None and not info["is_template"],
+        "仍是空白模板：不会产生任何入场，见 docs/STRATEGY_TEMPLATE.md" if info["is_template"] else info["name"])
     for f in ("monitor/events_calendar.py", "monitor/run_monitor.py", "research/matrix.py"):
         add(f"{f} 存在", (HOME / f).exists())
     if not a.research:
@@ -196,7 +223,7 @@ def cmd_doctor(a) -> int:
 
 
 def cmd_status(a) -> int:
-    obj = {"ok": True, "services": {k: unit_state(u) for k, u in UNITS.items()},
+    obj = {"ok": True, "strategy": strategy_info(), "services": {k: unit_state(u) for k, u in UNITS.items()},
            "gate": gate_call("status"), "events": events_info(), "metrics": metrics_info(),
            "alerts_24h": alerts_24h()}
     obj["ok"] = all(v == "active" for v in obj["services"].values() if not v.startswith("unknown"))
@@ -234,13 +261,15 @@ def cmd_daily(a) -> int:
     steps["events_job"] = run([SUDO, "-n", SYSTEMCTL, "start", JOBS["events"]], timeout=900)["rc"]
     steps["export_job"] = run([SUDO, "-n", SYSTEMCTL, "start", JOBS["export"]], timeout=900)["rc"]
     summary = {"ok": True, "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-               "steps": steps, "gate": gate_call("status"), "events": events_info(),
+               "strategy": strategy_info(), "steps": steps, "gate": gate_call("status"), "events": events_info(),
                "metrics": metrics_info(), "alerts_24h": alerts_24h()}
     problems = [k for k, v in steps["services_before"].items() if v not in ("active",) and not v.startswith("unknown")]
     if steps["events_job"] != 0:
         problems.append("s03-events 失败（来源异常或格式变化，见 events.sources）")
     if steps["export_job"] != 0:
         problems.append("s03-ft-export 失败")
+    if summary["strategy"]["is_template"]:
+        problems.append("仍在使用空白策略模板：不会产生任何入场（见 docs/STRATEGY_TEMPLATE.md）")
     if not summary["events"].get("ok"):
         problems.append("事件文件不新鲜或有来源异常")
     summary["problems"] = problems
@@ -274,7 +303,7 @@ def cmd_test(a) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="s03ft", description="S-03 freqtrade 流程命令行（给 OpenClaw agent 使用）")
+    ap = argparse.ArgumentParser(prog="s03ft", description="S03 freqtrade 流程命令行（给 OpenClaw agent 使用）")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("doctor")
     p.add_argument("--json", action="store_true")

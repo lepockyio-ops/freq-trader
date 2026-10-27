@@ -1,10 +1,10 @@
 ---
 name: s03ft-ops
-description: S-03 freqtrade 运维：每日例行、服务故障处理、查看状态与日志。只用 s03ft 命令。
+description: S03 freqtrade 运维：每日例行、服务故障处理、查看状态与日志。只用 s03ft 命令。
 metadata: { "openclaw": { "requires": { "bins": ["s03ft"] } } }
 ---
 
-# S-03 运维技能
+# S03 运维技能
 
 ## 可用命令（只有这些）
 | 命令 | 作用 |

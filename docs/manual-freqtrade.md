@@ -1,36 +1,16 @@
-# freqtrade 交易流程手册（S-03 · v1.1）
+# freqtrade 交易流程手册（框架版 v2.0 · 策略留空）
 
 Oct 26, 2026 · @Pocky
 
 ## 结论摘要
 
-**v1.1 更新（2026-10-26）：** 整套流程封装成可直接交给 OpenClaw 执行的库（第 15 节）：统一命令 `s03ft`、4 个 agent 的工作区与技能、一键部署脚本。
+**v2.0 起，本手册描述的是“策略留空”的 freqtrade 交易框架**：数据、风控、下单保护、监控告警、OpenClaw 运维与复盘全部保留；交易风格与入场/离场规则留空，由使用者写进 `user_data/strategies/MyStrategy.py`。原 S-03 策略只保留在 git 历史里。
 
-**v1.0 更新（2026-10-26）：** 执行了 5 项改进（第 14 节），并修复了策略里的两个问题：最小止损 0.8% 未生效、资金费预留过度压缩仓位。
-
-**v0.4 更新（2026-10-26）：** 整套流程改为由 OpenClaw agent 启动和运行，新增第 13 节。分工与主手册第 17 节相同：s03-ops 运维、s03-analyst 告警分析用单个 agent，s03-research 研究、s03-review 复盘用主 agent 派生子 agent。freqtrade 与监控程序做交易决策和监控；dry\_run 开关、API Key、恢复交易仍只由你控制。
-
-**v0.3 更新（2026-10-26）：** 新增第 12 节“行情监控与告警”。独立的监控进程用 Binance WebSocket 盯盘、按阈值告警，不消耗 LLM token；只有告警才交给 OpenClaw 分析。OpenClaw 唯一能做的动作是经白名单代理调用 freqtrade 的 `/stopentry`（只停新开仓）。告警核心代码与 Hyperliquid 版是同一份。
-
-**v0.2 更新（2026-10-26）：** 按你的决定，交易所定为 **Binance USDⓈ-M 永续合约**（你确认可用、无地区限制），入场保持**实现 A**。freqtrade 本身不支持突破买入单，所以策略改用 1 分钟主时间框架来近似实现 A：1 分钟最高价一触及触发价，就在下一分钟开盘以限价买入，比交易所端的突破单慢约 1 分钟。策略文件已写好，并在 freqtrade 2026.9 上加载、回测、做过前视偏差检查（结果见第 6 节）。下表为 v0.1 时的对比，入场与交易所两行已更新。
-
-这份手册把《加密货币交易流程手册》里的 S-03 策略和风控设定搬到 [freqtrade](https://github.com/freqtrade/freqtrade) 上运行。不再自己调用 Hyperliquid 原生 API，而是由 freqtrade 负责连接交易所、回测、模拟运行和实盘下单。好处是少写大量基础设施，并且自带前视偏差检查、保护机制和 FreqAI；代价是入场方式、止损口径和止损更新速度都要跟着 freqtrade 的规则来。
-
-**与 Hyperliquid 原生版的关键差异：**
-
-| 项目 | Hyperliquid 原生版 | freqtrade 版 | 影响 |
-| --- | --- | --- | --- |
-| 入场方式 | 实现 A：前高上方挂突破触发单 | 用 1 分钟主框架近似实现 A：触及触发价后，下一分钟开盘限价买入 | 比交易所端突破单慢约 1 分钟；回测、dry-run、实盘口径一致 |
-| 止损口径 | 按价格设定 | freqtrade 的 stoploss 是“占自有资金的亏损比例”，有杠杆时会被放大 | 必须用 custom\_stoploss 把价格止损换算成比例 |
-| 交易所端止损 | 入场单与止损成组提交 | 入场成交后由 freqtrade 挂出；默认每 60 秒检查更新一次 | 成交到挂出之间有短暂空窗 |
-| 交易所 | Hyperliquid | Binance USDⓈ-M 永续合约，交易所端止损用市价单 | 跳空时止损仍会成交，但可能有滑点 |
-| 前视偏差检查 | 自写单元测试 | 自带 lookahead-analysis | 更容易发现“偷看未来”的指标 |
-| 停手规则 | 自写风控层 | 自带 Protections（连续止损、回撤、冷却期） | 配置即可，回测中也能启用 |
-| 机器学习 | 只借鉴 FreqAI 的方法 | 可以直接使用 FreqAI | 但样本不足的问题完全相同 |
-
-**不变的部分：** S-03 的筛选与出场规则、单笔 0.5% 风险、杠杆上限 30 倍（单仓杠杆仍按公式控制在约 7–9 倍）、不设最大回撤、上线门槛 G1–G9。
-
-本文是流程设计，不含策略有效的证据，也不是交易指令。freqtrade 的功能描述来自其 2026-10-26 的官方文档。
+- **框架负责（任何策略都绕不过）**：单笔风险定仓（示例值 0.5%）、隔离保证金杠杆与强平距离检查、止损距离 0.8–3.0% 检查（skip / floor）、总持仓风险上限、相关性限制、宏观事件窗口禁开仓、最长持有天数、保护机制；dry\_run 默认开启。
+- **策略负责**：给出 `enter_long` 信号与绝对止损价 `fw_stop`；可选 `fw_entry_cap`、`take_profit_legs()`、`strategy_exit()`、`framework_params()`。
+- **默认状态**：配置里的策略是空白模板 `MyStrategy`（`is_template = True`），不会产生任何入场；`s03ft doctor` 会提示“尚未配置自己的策略”。
+- **示例插件**：`examples/strategies/SmaCrossExample.py`（日线趋势 + 15 分钟均线上穿），只演示接口，默认不启用，不代表可交易的优势。
+- 任何策略启用前都需按 §7–§9 重新回测、前推与影子运行；阈值标注沿用 用户设定 / 示例值 / 经数据验证。
 
 ## 1. 适用对象、已知条件与假设
 
@@ -94,49 +74,49 @@ freqtrade download-data -c user_data/config.json --timeframes 1m 15m --timerange
 - 数据质量：沿用主手册第 3 节的检查清单。freqtrade 不会自动做跨交易所核对，可用 OKX 公开行情做参考价。
 - 本次测试环境访问 Binance 公开接口被地区限制，第 6 节的验证改用 OKX 同名永续合约的数据。
 
-## 4. 市场状态与机会筛选
+## 4. 市场状态与机会筛选（由你的策略填写）
 
-S-03 的第 1–2 步（R1–R6 筛选和支撑区）在 freqtrade 里写成一个日线信息周期的指标函数，结果合并进 15 分钟主数据。规则和阈值与主手册第 4 节完全相同（均为示例值），这里只写在 freqtrade 中怎么放。
+本节由使用者按自己的策略填写。框架只提供数据与检查工具，不预设任何“市场状态”判断。建议至少写清：
 
-| 规则 | freqtrade 中的位置 | 注意 |
+| 要填写的内容 | 说明 | 阈值标注 |
 | --- | --- | --- |
-| R1 强势（30/90/180 日涨幅任一 ≥ 30%） | `@informative("1d")` 修饰的指标函数 | startup\_candle\_count 至少覆盖 181 根日线；实盘可加载的 K 线数受交易所限制 |
-| R2 流动性（日均成交额 ≥ 5,000 万 USD） | 同上，用日线成交量 × 收盘价 | 不用 VolumePairList：它不支持回测，并会改变交易对列表 |
-| R3 市场背景（BTC 在上行 21 日 EMA 之上，或 ≥ 2 个标的同时强势） | `@informative("1d", "BTC/{stake}:{stake}")` 引入 BTC 日线 | “≥ 2 个标的”要读取其他交易对，可能在 lookahead-analysis 中误报，需人工确认 |
-| R4–R6 低点抬高、波动收缩、站上均线 | 同一个日线指标函数 | 摆动点需要右侧 3 根确认，只能用已确认的摆动点 |
-| 支撑区（EMA、前高前低、AVWAP 聚合） | 同上，输出 zone\_lo / zone\_hi / retests 三列 | 可直接复用原生版代码中的纯函数（signals/s03.py） |
+| 交易标的与周期 | 哪些永续合约（config 的 pair\_whitelist）、信号周期（模板默认 15m） | 用户设定 |
+| 允许做多的市场状态 | 用什么数据、什么条件判断“今天能做”（写在 populate\_indicators / populate\_entry\_trend） | 示例值 → 待验证 |
+| 不做的情形 | 例如流动性差、资金费率极端、数据缺失 | 示例值 → 待验证 |
+| 跨标的条件 | 若需要（如 BTC 大盘过滤），用 informative pairs 读取，只用已收盘 K 线 | 用户设定 |
 
-**防止前视偏差的两个要点：**
+框架另外强制的过滤（策略无法关闭）：宏观事件窗口禁开仓、总持仓风险上限、相关性限制、模板策略（is\_template）禁止入场。
 
-- 官方文档提醒“普通合并会隐含前视偏差”。日线数据的时间戳是开盘时间，必须延后一根再合并，当天的日线在收盘前不可见。@informative 修饰器已处理这一点，自己写合并时要照做（[策略自定义文档](https://www.freqtrade.io/en/stable/strategy-customization/)）。
-- 摆动低点和 AVWAP 锚点都不能用整段数据的未来最高点，要用“截至当天”的滚动窗口计算。写完后必须跑 lookahead-analysis（第 6 节）。
+## 5. 策略规格模板（填空）与 FrameworkStrategy 接口
 
-**状态与禁入：** 数据异常、资金费率过高、宏观事件窗口写在 `confirm_trade_entry` 里，任一条件触发就放弃这次入场。这个回调在下单前的最后一刻运行。
+新策略：复制 `user_data/strategies/MyStrategy.py`（或 `examples/strategies/SmaCrossExample.py`），继承 `FrameworkStrategy`，把 `is_template` 改为 False，再把 config 里的 `"strategy"` 改成你的类名。完整说明见仓库 `docs/STRATEGY_TEMPLATE.md` 与 `docs/FRAMEWORK.md`。
 
-## 5. 策略规格：S-03 在 freqtrade 中的写法
+**策略规格（填空）**
 
-freqtrade 只支持限价单和市价单入场，没有“突破买入”的挂单类型（[回调文档](https://www.freqtrade.io/en/stable/strategy-callbacks/)仅支持修改限价单价格；回测代码也把限价限制在 K 线高点以内）。为了保持**实现 A**，策略把主时间框架设为 **1 分钟**：15 分钟状态机算出触发价，1 分钟最高价首次触及触发价时发出入场信号，下一分钟开盘以限价买入。下表把 S-03 的每条规则对应到策略文件 `S03Strategy.py` 里的方法和配置，参数均为主手册中的示例值。
-
-| S-03 规则 | freqtrade 方法 / 配置 | 写法要点 |
+| 项目 | 你的写法 | 阈值标注 |
 | --- | --- | --- |
-| 日线背景 R1–R6、支撑区 | `@informative("1d")` → `daily_s03_columns` | 见第 4 节；与原生版逐日比对 0 处差异 |
-| R3 大盘条件 | `@informative("1d", "BTC/{stake}:{stake}")` | 简化为“BTC 收盘在上行的 21 日 EMA 之上”（示例值），未实现“或 ≥ 2 个标的强势” |
-| 布防与回升确认 | `populate_indicators` → `run_15m_state_machine` | 与原生版相同的状态机，逐根已收盘 15 分钟 K 线运行：等待 → 布防（低点进支撑区）→ 确认（收阳），跌破支撑下沿回到等待 |
-| 触发价与止损价 | 同上 | 触发价 = 最近一根已收盘 15 分钟 K 线高点；止损 = 前一根低点下方 0.1%；止损 < 0.8% 改用当日低点，> 3% 不入场 |
-| 触发（实现 A） | `populate_entry_trend` 设 `enter_long = 1`，`enter_tag = "S03"` | 1 分钟最高价首次触及触发价（上一分钟还没触及），且已确认 |
-| 入场价上限 | `custom_entry_price` + `order_types.entry = "limit"` | 限价 = min(下一分钟开盘价, 触发价 × 1.001)；`unfilledtimeout` 3 分钟，超时撤单 |
-| 禁入检查 | `confirm_trade_entry` | 事件窗口、总在险风险 ≤ 1.5%、与已持仓 30 日相关系数 > 0.8 则放弃 |
-| 仓位（0.5% 风险） | `custom_stake_amount` | 见第 7 节公式；freqtrade 的 stake 是保证金，名义价值 = stake × 杠杆 |
-| 单仓杠杆 | `leverage()` | 主手册公式，≤ 30 且 ≤ 交易所上限；维持保证金率用代码里的估计值 |
-| 价格止损 | `custom_stoploss` + `order_filled` | 成交时把止损价写进 trade 自定义数据，用 `stoploss_from_absolute` 换算成比例；交易所端市价止损 |
-| 3R / 5R 分批 | `position_adjustment_enable = True` + `adjust_trade_position` | 返回负 stake 部分平仓：3R 卖初始仓位 1/3，5R 再卖 1/3；档位记在自定义数据里 |
-| 强市保留整仓 | 同上 | 其他持仓浮盈合计 ≥ 2R 且 BTC 强势时，3R 不减仓 |
-| 乖离减仓 | 同上 | 日线收盘高于 9 日 EMA 超过 2 倍 ATR，卖出剩余仓位的一半 |
-| 日线跌破 9 日 EMA 离场 | `custom_exit` | 用已收盘日线判断；离场原因 "ema9\_break" |
-| 最长持有 30 天 | `custom_exit` | 离场原因 "max\_hold" |
-| 关掉默认离场 | `minimal_roi = {"0": 100}`；`stoploss = -0.99`（兜底）；`use_exit_signal = False` | 避免默认规则干扰 S-03 |
+| 名称 / 版本 | （填写） | — |
+| 交易风格 | 日内 / 波段 / 其他（填写） | 用户设定 |
+| 入场条件 | （填写，对应 enter\_long） | 示例值 → 待验证 |
+| 初始止损 | （填写，对应 fw\_stop，须在 0.8–3.0% 内或由 floor 处理） | 示例值 → 待验证 |
+| 入场价上限 | （可选，对应 fw\_entry\_cap） | 示例值 |
+| 分批止盈 | （可选，take\_profit\_legs 返回 R 倍数、比例、标签） | 示例值 |
+| 策略离场 | （可选，strategy\_exit） | 示例值 |
+| 失效条件 | 什么情况下停用这个策略（填写） | 用户设定 |
 
-与原生版交易所端突破单相比，1 分钟近似的入场约晚 1 分钟，快速拉升时入场价会略差；限价上限（触发价 × 1.001）防止追高，代价是部分信号不成交。回测、dry-run、实盘用的是同一套规则，所以三者之间可以直接对比。
+**FrameworkStrategy 接口**
+
+| 成员 | 必须 / 可选 | 作用 |
+| --- | --- | --- |
+| `enter_long` 列 | 必须 | 1 = 下一根 K 线入场 |
+| `fw_stop` 列 | 必须 | 绝对止损价；框架检查距离、算仓位与杠杆 |
+| `fw_entry_cap` 列 | 可选 | 入场限价上限，超出不追 |
+| `take_profit_legs(trade)` | 可选 | \[(R 倍数, 比例, 标签)\]，框架按 R 分批减仓 |
+| `strategy_exit(...)` | 可选 | 返回离场标签或 None |
+| `framework_params()` | 可选 | 覆盖 FW\_DEFAULTS（只能更保守时请注明理由） |
+| `is_template` | 属性 | True 时框架禁止一切入场 |
+
+框架固定负责：stake 计算、隔离杠杆与强平距离、止损距离检查、事件窗口、总风险与相关性、stoploss\_from\_absolute、保护机制、最长持有天数。
 
 ## 6. 回测、前视偏差检查、hyperopt、dry-run 与上线门槛
 

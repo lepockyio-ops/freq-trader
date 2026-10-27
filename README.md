@@ -1,73 +1,51 @@
-# S-03 freqtrade 策略（Binance USDⓈ-M 永续 · 只做多 · 实现 A）
+# freq-trader：freqtrade 自动交易框架（Binance USDⓈ-M 永续 · 策略留空，可接入任意策略）
 
 > **交给 OpenClaw 直接执行：见 [OPENCLAW.md](OPENCLAW.md)。** 一键部署 `sudo bash deploy/install.sh`，agent 通过统一命令 `s03ft` 操作。
 
-对应《freqtrade 交易流程手册》v0.2。交易风格与原生版一致（R1–R6 日线筛选、支撑区、下探回升后突破前一根
-15 分钟高点入场、0.5% 风险、3R/5R 分批、9 日 EMA 追踪）。默认 `dry_run = true`，不会下真实订单。
-已在 freqtrade 2026.9 上加载、回测并做过前视偏差检查。所有阈值是示例值，不代表策略有效。
+v2.0 起，这是一个**不含交易策略的框架**：止损护栏、仓位与杠杆、事件窗口、总风险与相关性、交易所端止损、
+Protections、监控告警、官方事件日历、复盘指标、研究矩阵、OpenClaw 运维与一键部署都已就绪；交易规则由你写成一个
+继承 `FrameworkStrategy` 的 freqtrade 策略接入。默认策略是空白模板 `MyStrategy`：可以运行，但不会产生任何入场。
+原先的 S-03 策略保留在 git 历史中（v1.x）。默认 `dry_run = true`。需要 freqtrade 2026.9。
 
-## v1.0 改进（2026-10-26）
+## 接入你的策略（3 步）
 
-| 改进 | 文件 |
-| --- | --- |
-| 事件日历改用官方来源（美联储、BLS、BEA），策略读取 `S03_EVENTS_FILE`，文件过旧即停新仓 | `monitor/events_calendar.py`、`deploy/systemd/s03-events.*` |
-| 修复最小止损未生效（`stop_min_mode`）与资金费预留过度压缩仓位（`funding_cap_frac_of_stop`） | `user_data/strategies/S03Strategy.py` |
-| 随机性质测试（Hypothesis） | `tests/test_properties.py` |
-| 研究矩阵 + 复核 + G0（lookahead + recursive） | `research/matrix.py` |
-| 复盘指标由程序计算 | `monitor/review_metrics.py`、`deploy/bin/s03-ft-export` |
-| systemd 看门狗（freqtrade `internals.sd_notify`）、外部心跳、freqtrade webhook 事件推送 | `deploy/ft-api.json`、`monitor/binance_monitor.py`、`deploy/bin/s03-heartbeat` |
+1. 按 `docs/STRATEGY_TEMPLATE.md` 写好策略规格（适用市场、信号、止损、仓位、离场、验证门槛）。
+2. 修改 `user_data/strategies/MyStrategy.py`：设置 `timeframe`；在 `populate_entry_trend()` 写 `enter_long = 1` 和
+   `fw_stop`（绝对止损价）；按需实现 `take_profit_legs()`、`strategy_exit()`；删掉 `is_template = True`。
+   改了类名就同步修改 `user_data/config.json` 的 `"strategy"`。
+3. `pytest -q` → `s03ft research plan/run/aggregate`（研究矩阵）→ `s03ft research g0`（偏差检查）→ 按 G1–G9 逐级上线。
+
+框架说明见 `docs/FRAMEWORK.md`。示例 `examples/strategies/SmaCrossExample.py` 只用于验证框架能跑通，不代表可交易：
+`freqtrade backtesting -c user_data/config.json --strategy SmaCrossExample --strategy-path examples/strategies`
 
 ## 文件
 
 | 路径 | 作用 |
 | --- | --- |
-| `user_data/strategies/S03Strategy.py` | 策略（单文件，不依赖 TA-Lib） |
-| `user_data/config.json` | Binance 期货、逐仓、最多 3 笔、交易所端市价止损、dry_run |
-| `user_data/config-private.example.json` | 密钥与 API 服务器模板：复制为 `config-private.json` 后在你本机填写 |
-| `user_data/config-test-okx.json` | 我在测试环境里用的 OKX 配置（含本测试环境专用的代理与证书设置，你用不到） |
-| `tests/test_s03_core.py` | 6 个测试：无未来信息、状态机、杠杆公式 |
-| `monitor/` | 行情监控与告警（独立进程）：Binance WebSocket → 告警 → OpenClaw；白名单代理 |
-| `deploy/` | 由 OpenClaw agent 运行整套流程：systemd 服务、sudoers 白名单、4 个 agent 的配置与职责说明、命令白名单（见 deploy/README.md） |
-| `tests/test_deploy.py` | 14 个部署检查：服务权限、密钥只给需要的服务、sudoers 与命令白名单一致 |
-| `tests/test_monitor.py` | 6 个测试：Binance 消息解析、资金费率结算、freqtrade 持仓转换、配置 |
-| `tests/S03TestRelaxed.py` | 仅测试用：放宽日线条件以产生交易，验证回调能运行；不可用于交易 |
+| `user_data/strategies/framework_base.py` | **框架基类** `FrameworkStrategy`：止损护栏、仓位、杠杆、入场前检查、交易所端止损、分批、最长持有、Protections |
+| `user_data/strategies/MyStrategy.py` | **空白策略模板**（默认） |
+| `examples/strategies/SmaCrossExample.py` | 示例策略（只用于验证框架） |
+| `docs/STRATEGY_TEMPLATE.md`、`docs/FRAMEWORK.md` | 策略规格填写模板、框架说明 |
+| `user_data/config.json` | Binance 期货、逐仓、最多 3 笔、交易所端市价止损、dry_run、`"strategy"` |
+| `user_data/config-private.example.json` | 密钥与 API 服务器模板（本地调试用） |
+| `user_data/config-test-okx.json` | 测试环境用的 OKX 配置（你用不到） |
+| `monitor/` | 行情监控与告警、白名单代理、官方事件日历、复盘指标 |
+| `research/matrix.py` | 研究矩阵（策略名读配置或 `FW_STRATEGY`） |
+| `s03ft/` | 给 OpenClaw agent 的统一命令行 |
+| `deploy/` | 一键部署、systemd、sudoers、4 个 agent 的工作区与技能 |
+| `tests/` | 53 个测试：框架护栏（随机性质测试）、空白模板、示例策略、freqtrade 实际回测、监控、部署、命令行 |
 
-## 实现 A 在 freqtrade 中怎么做
-
-freqtrade 不支持“突破买入”的止损类入场单（其回测代码注释写明：限价不得高于 K 线高点，否则就是 freqtrade 实盘不支持的止损限价入场）。
-因此主时间框架用 **1 分钟**：触发价 = 最近一根已收盘 15 分钟 K 线高点；1 分钟最高价首次触及触发价 → 下一根 1 分钟开盘以限价买入，
-限价上限 = 触发价 × 1.001，3 分钟未成交撤单。与交易所突破单相比约慢 1 分钟；回测、dry-run、实盘口径一致。
-
-## 使用顺序
-
-```bash
-# 1. 安装（建议 Docker，并固定版本标签；或 pip install freqtrade==2026.9）
-# 2. 下载数据：日线需要比回测起点再早约 230 天
-freqtrade download-data -c user_data/config.json --timeframes 1d --timerange 20200101-
-freqtrade download-data -c user_data/config.json --timeframes 1m 15m --timerange 20210101-
-# 3. 测试
-pytest -q tests/
-# 4. 回测（G1–G5）与前视偏差检查（G0）
-freqtrade backtesting -c user_data/config.json --timerange 20210101-20241231 --enable-protections --export trades
-freqtrade lookahead-analysis -c user_data/config.json --timerange 20250101-
-# 5. dry-run（G8：≥ 4 周且 ≥ 20 笔）
-freqtrade trade -c user_data/config.json -c user_data/config-private.json
-# 6. 实盘（G9）：由你本人把 dry_run 改为 false，资金 ≤ 1,000 USDT
-```
-
-## 测试环境里已验证的内容（2026-10-26，OKX 永续数据代替 Binance）
+## 测试环境里已验证（2026-10-27，OKX 永续数据代替 Binance）
 
 | 项目 | 结果 |
 | --- | --- |
-| 策略加载与回测（2026-10-08 至 10-26） | 正常运行；0 笔交易，符合当前 4 个标的都不满足日线条件 |
-| 日线筛选与原生版逐日比对（4 个标的、1,852 个交易日） | 0 处差异；其中 48 个交易日符合条件（约 2.6%） |
-| 放宽版回测（仅测试用） | 24 笔；3R / 5R 分批、交易所端止损、强制离场都按设计成交 |
-| freqtrade lookahead-analysis（放宽版，6 个信号） | 入场 0 个有偏差、指标 0 个有偏差；离场 1 个被标记，原因未确认（见下） |
-| 单元测试 | 6 个全部通过，含“截断历史与完整历史结果一致”的无未来信息测试 |
+| 空白模板回测（SOL、BTC，2026-10-05 至 10-26） | 正常运行，0 笔交易 |
+| 示例策略回测（同上） | 7 笔，全部为止损离场；单笔亏损约 34–37 USDT（风险预算 50）；止损按价格挂出 |
+| 框架护栏随机测试 | 止损距离、强平距离、风险预算三条规则在数千组随机输入下都成立 |
 
-Binance 公开接口在测试环境所在地区被限制，因此没能用 Binance 数据测试；Binance 与 OKX 的交易对写法相同，策略本身与交易所无关。
+示例结果只说明框架能跑通，不说明示例策略有效。
 
-## 行情监控与告警（手册第 12 节）
+## 行情监控与告警
 
 ```bash
 cp monitor/monitor.example.toml monitor/monitor.toml
@@ -85,11 +63,10 @@ python monitor/run_monitor.py gate              # OpenClaw 白名单代理（127
 
 ## 已知问题
 
-- **离场偏差标记未确认**：关掉跨交易对规则后仍有 1 个离场被标记。疑似分段回测在持仓未结束时截断数据导致强制离场；请在你本机用更长数据重跑。
-- **资金费预留（v1.0 已修复）**：预留不超过止损距离的 20%；同类放宽版测试中，单笔止损亏损约 39 USDT（预算 50），修复前约 13–24 USDT。
-- **R3 简化**：只用“BTC 在上行的 21 日 EMA 之上”，未实现原生版的“或 ≥ 2 个标的同时强势”。
-- **维持保证金率**：杠杆公式用的是代码里的估计值，上线前用 Binance 的杠杆档位表核对，或直接调高以更保守。
-- **资金费率与参考价交叉核对**未在策略里实现（主手册第 3、4 节的规则），需要另写监控。
-- startup_candle_count = 400 时，实盘需 2 次请求取 1 分钟 K 线（freqtrade 会提示），属正常。
+- **护栏按计划入场价检查**：实际成交价不高于 `fw_entry_cap`，按成交价算的止损距离可能略小于下限（至多差一个限价偏移）。
+- **复盘 R 的口径（v2.0 修正）**：R 用 `stop_loss_abs` 计算。v1.x 用的是 `initial_stop_loss_abs`（兜底的 −99% 止损），会把 R 算得过小；v2.0 已改正。
+- **维持保证金率**：杠杆公式用的是 `framework_base.FW_DEFAULTS` 里的估计值，上线前用 Binance 的杠杆档位表核对。
+- **资金费率与参考价**只在监控进程里告警，入场前不检查；需要的话在你的策略里加条件。
+- **前视偏差**：每个新策略都要跑 `s03ft research g0`（lookahead-analysis + recursive-analysis）。
 
 本代码是研究与流程工具，不构成投资建议，不保证收益。

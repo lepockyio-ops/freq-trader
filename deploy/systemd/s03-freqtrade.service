@@ -1,5 +1,5 @@
 [Unit]
-Description=S-03 freqtrade（Binance USDⓈ-M；默认 dry_run）
+Description=S03 freqtrade（Binance USDⓈ-M；默认 dry_run）
 After=network-online.target 
 Wants=network-online.target
 StartLimitIntervalSec=600
@@ -16,11 +16,12 @@ Group=s03trader
 WorkingDirectory=/var/lib/s03-ft
 StateDirectory=s03-ft
 Environment=PYTHONUNBUFFERED=1
+# 使用哪个策略由 /etc/s03/ft-config.json 的 "strategy" 决定（默认空白模板 MyStrategy）
 Environment=S03_EVENTS_FILE=/var/lib/s03-events/events.json
 # 交易所 API Key 与 freqtrade API 账号用 FREQTRADE__ 环境变量注入：root 所有、0600，OpenClaw 用户读不到
 EnvironmentFile=/etc/s03/ft-trader.env
 ExecStartPre=/opt/s03/venv/bin/freqtrade create-userdir --userdir /var/lib/s03-ft/user_data
-ExecStart=/opt/s03/venv/bin/freqtrade trade --userdir /var/lib/s03-ft/user_data -c /etc/s03/ft-config.json -c /etc/s03/ft-api.json --strategy S03Strategy --strategy-path /opt/s03/ft-s03/user_data/strategies --db-url sqlite:////var/lib/s03-ft/tradesv3.sqlite
+ExecStart=/opt/s03/venv/bin/freqtrade trade --userdir /var/lib/s03-ft/user_data -c /etc/s03/ft-config.json -c /etc/s03/ft-api.json --strategy-path /opt/s03/ft-s03/user_data/strategies --db-url sqlite:////var/lib/s03-ft/tradesv3.sqlite
 Restart=always
 RestartSec=10
 ReadWritePaths=/var/lib/s03-ft

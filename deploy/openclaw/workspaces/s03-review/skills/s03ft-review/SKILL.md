@@ -1,9 +1,9 @@
 ---
 name: s03ft-review
-description: S-03 每周复盘：读取程序算好的指标与交易记录，派生子 agent 分标的解读，写周报草稿。
+description: S03 每周复盘：读取程序算好的指标与交易记录，派生子 agent 分标的解读，写周报草稿。
 ---
 
-# S-03 复盘技能
+# S03 复盘技能
 
 ## 输入（全部在 inbox/，只读）
 `metrics.md` / `metrics.json`（程序计算：笔数、胜率、期望值 R、盈亏比、最长连亏、离场原因）、`ft_trades.json`、`ft_profit.json`、`ft_daily.json`、`ft_status.json`、`alerts.jsonl`、`events.json`。

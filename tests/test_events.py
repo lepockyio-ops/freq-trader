@@ -74,15 +74,14 @@ def test_diff_detects_moved_event():
     assert any(c["kind"] == "US_CPI" and c["time_utc"] == "2026-11-12T13:30:00Z" for c in moved)
 
 
-def test_strategy_reads_event_file_and_blocks_when_stale(tmp_path, monkeypatch):
+def test_framework_reads_event_file_and_blocks_when_stale(tmp_path):
     sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "user_data", "strategies"))
-    import S03Strategy as S
+    from MyStrategy import MyStrategy
 
     f = tmp_path / "events.json"
     ec.write_atomic(str(f), ec.build(_texts(), None, NOW, 35))
-    monkeypatch.setitem(S.P, "event_file", str(f))
-    monkeypatch.setitem(S.P, "event_file_required", True)
-    strat = S.S03Strategy.__new__(S.S03Strategy)
+    strat = MyStrategy.__new__(MyStrategy)
+    strat.framework_params = {"event_file": str(f), "event_file_required": True}
     assert strat._in_event_window(pd.Timestamp("2026-10-28T17:00:00Z"))
     assert not strat._in_event_window(pd.Timestamp("2026-10-27T12:00:00Z"))
     assert not strat._event_calendar_stale()

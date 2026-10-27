@@ -6,7 +6,7 @@ from review_metrics import compute, from_freqtrade  # noqa: E402
 
 
 def test_r_uses_entry_fill_amount_after_partial_exits():
-    t = {"pair": "SOL/USDT:USDT", "is_open": False, "open_rate": 100.0, "initial_stop_loss_abs": 98.0, "amount": 5.0,
+    t = {"pair": "SOL/USDT:USDT", "is_open": False, "open_rate": 100.0, "stop_loss_abs": 98.0, "amount": 5.0,
          "profit_abs": 60.0, "exit_reason": "ema9_break", "close_date": "2026-10-03",
          "orders": [{"ft_is_entry": True, "filled": 10.0}, {"ft_is_entry": False, "filled": 5.0}]}
     rows = from_freqtrade([t, {**t, "is_open": True}])

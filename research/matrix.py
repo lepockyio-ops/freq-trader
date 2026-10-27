@@ -7,7 +7,9 @@
   python research/matrix.py verify --job SOL-2023-base   # 重跑并比对逐笔哈希
   python research/matrix.py g0 --timerange 20250101-     # lookahead-analysis + recursive-analysis
 
-环境变量：S03_FT_CONFIG（默认 user_data/config.json）、S03_EVENTS_FILE（回测用 events_calendar.py --history 生成的历史事件文件）。
+环境变量：S03_FT_CONFIG（默认 user_data/config.json）、FW_STRATEGY（策略名，默认读配置）、FW_STRATEGY_PATH、
+          S03_EVENTS_FILE（回测用 events_calendar.py --history 生成的历史事件文件）。
+方案 stop_floor 只改变框架的止损护栏处理方式（S03_STOP_MIN_MODE=floor），对任何策略都适用。
 """
 from __future__ import annotations
 
@@ -24,6 +26,20 @@ from pathlib import Path
 ROOT = Path("research")
 RES = ROOT / "results"
 CONFIG = os.environ.get("S03_FT_CONFIG", "user_data/config.json")
+
+
+def strategy_args() -> list[str]:
+    """策略名：环境变量 FW_STRATEGY，否则读配置文件里的 "strategy"；FW_STRATEGY_PATH 可指向 examples/strategies。"""
+    name = os.environ.get("FW_STRATEGY")
+    if not name:
+        try:
+            name = json.loads(Path(CONFIG).read_text("utf-8")).get("strategy")
+        except (OSError, ValueError):
+            name = None
+    args = ["--strategy", name or "MyStrategy"]
+    if os.environ.get("FW_STRATEGY_PATH"):
+        args += ["--strategy-path", os.environ["FW_STRATEGY_PATH"]]
+    return args
 VARIANTS = {
     "base": ({}, []),
     "stop_floor": ({"S03_STOP_MIN_MODE": "floor"}, []),
@@ -47,7 +63,7 @@ def backtest(jid: str, outdir: Path) -> dict:
     env_extra, args = VARIANTS[variant]
     env = {**os.environ, "S03_EVENTS_REQUIRED": "0", **env_extra}
     outdir.mkdir(parents=True, exist_ok=True)
-    cmd = [freqtrade_bin(), "backtesting", "-c", CONFIG, "--strategy", "S03Strategy",
+    cmd = [freqtrade_bin(), "backtesting", "-c", CONFIG, *strategy_args(),
            "--timerange", f"{year}0101-{year + 1}0101", "-p", f"{base}/USDT:USDT", "--enable-protections",
            "--export", "trades", "--backtest-directory", str(outdir), *args]
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
@@ -118,7 +134,7 @@ def main() -> int:
         env = {**os.environ, "S03_EVENTS_REQUIRED": "0"}
         rc = 0
         for sub_cmd in (["lookahead-analysis"], ["recursive-analysis", "--startup-candle", "199", "400", "999"]):
-            cmd = [freqtrade_bin(), *sub_cmd, "-c", CONFIG, "--strategy", "S03Strategy", "--timerange", a.timerange]
+            cmd = [freqtrade_bin(), *sub_cmd, "-c", CONFIG, *strategy_args(), "--timerange", a.timerange]
             print("$", " ".join(cmd), flush=True)
             rc |= subprocess.run(cmd, env=env).returncode
         return rc

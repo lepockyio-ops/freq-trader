@@ -1,10 +1,10 @@
 ---
 name: s03ft-research
-description: S-03 研究：下载数据、研究矩阵回测（子 agent 并行）、复核、G0 偏差检查、事件历史、规格审查。
+description: S03 研究：下载数据、研究矩阵回测（子 agent 并行）、复核、G0 偏差检查、事件历史、规格审查。
 metadata: { "openclaw": { "requires": { "bins": ["s03ft", "freqtrade"] } } }
 ---
 
-# S-03 研究技能
+# S03 研究技能
 
 ## 命令
 | 步骤 | 命令 |

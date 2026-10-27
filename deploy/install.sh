@@ -103,7 +103,7 @@ install -d -m 0750 "$R/srv/s03-review" "$R/srv/s03-research"
 install -d -m 2750 "$R/srv/s03-review/inbox"
 own "$OC_USER:$OC_USER" "$R/srv/s03-review" "$R/srv/s03-research"
 own "s03trader:$OC_USER" "$R/srv/s03-review/inbox"
-for d in user_data tests monitor research s03ft pyproject.toml; do
+for d in user_data tests monitor research examples s03ft pyproject.toml docs; do
   [[ -e "$R/srv/s03-research/$d" ]] || cp -r "$SRC/$d" "$R/srv/s03-research/"
 done
 rm -rf "$R/srv/s03-research/user_data/data" "$R/srv/s03-research/user_data/config-private.example.json"

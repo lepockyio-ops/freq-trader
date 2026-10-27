@@ -1,4 +1,4 @@
-// OpenClaw 配置片段（freqtrade 版 v1.0）：4 个 S-03 agent、各自的技能白名单、hooks。
+// OpenClaw 配置片段（freqtrade 版 v1.0）：4 个 S03 agent、各自的技能白名单、hooks。
 // 合并进你的 OpenClaw 配置后运行 `openclaw doctor`。键名来自官方文档（2026-10-26 查阅：webhooks、
 // multi-agent-sandbox-tools、subagents、skills）；标了“核对”的地方请按你的版本确认。
 {

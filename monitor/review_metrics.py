@@ -63,14 +63,15 @@ def alert_counts(records: list[dict]) -> dict:
 
 def from_freqtrade(trades: list[dict]) -> list[dict]:
     """freqtrade 版：从 REST API /trades 的已平仓交易计算逐笔 R。
-    R = 盈亏 / (入场成交数量 × (开仓价 − 初始止损价))；分批平仓后 trade.amount 会变小，所以用入场订单的成交量。"""
+    R = 盈亏 / (入场成交数量 × (开仓价 − 止损价))；分批平仓后 trade.amount 会变小，所以用入场订单的成交量。
+    止损价用 stop_loss_abs：框架按绝对价格设止损且不移动；initial_stop_loss_abs 是兜底的 −99% 止损，不能用。"""
     out = []
     for t in trades:
         if t.get("is_open"):
             continue
         entry_amt = sum(float(o.get("filled") or 0) for o in t.get("orders") or [] if o.get("ft_is_entry"))
         entry_amt = entry_amt or float(t.get("amount") or 0)
-        risk = entry_amt * (float(t.get("open_rate") or 0) - float(t.get("initial_stop_loss_abs") or 0))
+        risk = entry_amt * (float(t.get("open_rate") or 0) - float(t.get("stop_loss_abs") or 0))
         pnl = float(t.get("profit_abs") or 0)
         out.append({"coin": str(t.get("pair", "")).split("/")[0], "pnl": pnl,
                     "r": round(pnl / risk, 3) if risk > 0 else None, "exit_reason": t.get("exit_reason"),

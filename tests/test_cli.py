@@ -84,3 +84,13 @@ def test_no_forbidden_commands_in_cli():
     src = (ROOT / "s03ft" / "cli.py").read_text("utf-8")
     for bad in ("forceexit", "forceenter", "/start", "dry_run\"] =", "reset-failed", "daemon-reload"):
         assert bad not in src, bad
+
+
+def test_strategy_info_detects_blank_template(cli, monkeypatch):
+    c, _ = cli
+    monkeypatch.delenv("FW_STRATEGY", raising=False)
+    info = c.strategy_info(research=True)
+    assert info["name"] == "MyStrategy" and info["is_template"] and info["file"].endswith("MyStrategy.py")
+    monkeypatch.setenv("FW_STRATEGY", "SmaCrossExample")
+    info = c.strategy_info(research=True)
+    assert not info["is_template"] and info["file"].endswith("SmaCrossExample.py")

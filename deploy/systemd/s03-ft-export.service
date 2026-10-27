@@ -1,5 +1,5 @@
 [Unit]
-Description=S-03 导出交易记录、盈亏与告警到复盘 agent 的收件目录（只读副本）
+Description=S03 导出交易记录、盈亏与告警到复盘 agent 的收件目录（只读副本）
 OnFailure=s03-notify-ops@%n.service
 
 [Service]

@@ -6,5 +6,5 @@
 ## 规则
 - 只运行技能里列出的命令；不能运行 `freqtrade trade`。
 - 报告里的数字只能来自程序输出（`research/matrix_report.md`、命令的 JSON 行）。
-- 不改 `S03Strategy.py` 来“让结果变好”；确需改动时写成补丁放在 `proposals/`，并重跑 G0–G5。
+- 不改策略文件（`user_data/strategies/` 下）来“让结果变好”；确需改动时写成补丁放在 `proposals/`，并重跑 G0–G5。
 - 样本不足写“证据不足”（G1 ≥ 100 笔、FreqAI ≥ 300 个事件），不降低门槛。

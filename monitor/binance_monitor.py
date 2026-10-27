@@ -120,8 +120,8 @@ def positions_from_ft(trades: list[dict], require_exchange_stop: bool = True) ->
         if not t.get("is_open") or t.get("is_short"):
             continue
         entry = t.get("open_rate")
-        init_stop = t.get("initial_stop_loss_abs") or t.get("stop_loss_abs")
-        cur_stop = t.get("stop_loss_abs") or init_stop
+        init_stop = t.get("stop_loss_abs")              # 框架止损按价格设定且不移动；initial_* 是兜底的 −99%
+        cur_stop = init_stop
         if not entry or not init_stop:
             continue
         has_stop = any(o.get("ft_order_side") == "stoploss" and o.get("is_open") for o in t.get("orders") or [])

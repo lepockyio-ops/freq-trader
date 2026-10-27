@@ -1,5 +1,5 @@
 [Unit]
-Description=S-03 OpenClaw 白名单代理（127.0.0.1:8765：status 与 pause→/stopentry）
+Description=S03 OpenClaw 白名单代理（127.0.0.1:8765：status 与 pause→/stopentry）
 After=network-online.target s03-freqtrade.service
 Wants=network-online.target
 StartLimitIntervalSec=600

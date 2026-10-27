@@ -1,5 +1,5 @@
 [Unit]
-Description=S-03 行情监控与告警（Binance WebSocket；不需要交易所密钥，不消耗 LLM token）
+Description=S03 行情监控与告警（Binance WebSocket；不需要交易所密钥，不消耗 LLM token）
 After=network-online.target s03-freqtrade.service
 Wants=network-online.target
 StartLimitIntervalSec=600
