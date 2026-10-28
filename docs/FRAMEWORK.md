@@ -21,6 +21,12 @@
 默认策略是空白模板 `MyStrategy`：freqtrade、监控、告警、复盘、OpenClaw 都能运行，但不会产生任何入场；
 `s03ft daily` 的 problems 会提示“仍在使用空白策略模板”。示例 `examples/strategies/SmaCrossExample.py` 只用于验证框架能跑通。
 
+## 研究前端（v2.2：找想法 → 筛因子 → 回测 → 统计检验）
+
+`fwresearch/`（两个模板共用）提供想法登记簿、内置因子库（55 个）与因子检验（5 个币时默认跨币种比较）、逐笔 R 的统计检验（Bootstrap、符号翻转、滚动分段、
+Deflated Sharpe、PBO）。找想法可选接入 Vibe-Trading，经 `mcp-guard` 白名单代理，只给研究 agent 用，交易类工具一律拒绝。
+入口：`s03ft lab …`；详见 `docs/RESEARCH_LAB.md`。
+
 ## 注意
 
 - 护栏按“计划入场价”（`fw_entry_cap`，没有则用信号价）检查；实际成交价不高于它，按成交价算的止损距离可能略小于下限（至多差一个限价偏移）。

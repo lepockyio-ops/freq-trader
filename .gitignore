@@ -20,3 +20,6 @@ config/settings.toml
 user_data/config-private.json
 *.env
 *.egg-info/
+# 研究前端输出（程序生成，可随时重跑）；想法登记簿 research/ideas.jsonl 建议保留并提交
+research/lab/
+research/results/trades/

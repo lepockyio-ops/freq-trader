@@ -47,7 +47,8 @@
             "BTC/USDT:USDT",
             "ETH/USDT:USDT",
             "SOL/USDT:USDT",
-            "BNB/USDT:USDT"
+            "BNB/USDT:USDT",
+            "HYPE/USDT:USDT"
         ],
         "pair_blacklist": []
     },

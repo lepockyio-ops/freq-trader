@@ -68,7 +68,7 @@ def test_example_config_loads():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cfg = load_config(os.path.join(root, "monitor", "monitor.example.toml"))
     assert cfg.alerts.funding_abs_floor == 0.0003 and cfg.openclaw.enabled is False
-    assert cfg.openclaw.venue.startswith("Binance") and len(cfg.pairs) == 4
+    assert cfg.openclaw.venue.startswith("Binance") and len(cfg.pairs) == 5
 
 
 def test_freqtrade_webhook_events(tmp_path):

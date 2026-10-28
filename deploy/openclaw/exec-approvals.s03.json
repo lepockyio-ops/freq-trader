@@ -1,5 +1,5 @@
 {
-  "_说明": "OpenClaw 命令执行白名单（freqtrade 版 v1.0）：所有 agent 只通过 s03ft 一个命令操作。pattern 为命令名或路径 glob，argPattern 为对参数（不含 argv[0]）的 ECMAScript 正则，参数以单个空格连接。审批不是权限边界，真正的限制来自 sudoers、文件权限和沙箱。导入前删除以 _ 开头的键。",
+  "_说明": "OpenClaw 命令执行白名单（freqtrade 模板版 v2.2）：所有 agent 只通过 s03ft 一个命令操作。pattern 为命令名或路径 glob，argPattern 为对参数（不含 argv[0]）的 ECMAScript 正则，参数以单个空格连接。审批不是权限边界，真正的限制来自 sudoers、文件权限和沙箱。导入：openclaw approvals set --file <本文件>（OpenClaw 2026.10.8 实测可直接导入，以 _ 开头的注释键会被忽略）。",
   "version": 1,
   "defaults": {
     "security": "deny",
@@ -57,6 +57,14 @@
         {
           "pattern": "s03ft",
           "argPattern": "^research (plan|run|verify|aggregate|g0)( [A-Za-z0-9_.=:/,-]+)*$"
+        },
+        {
+          "pattern": "s03ft",
+          "argPattern": "^lab (factors|stats|matrix)( [A-Za-z0-9_.=:/,-]+)*$"
+        },
+        {
+          "pattern": "s03ft",
+          "argPattern": "^lab idea (add|list|show|move|attach|trials)(?!.*--by human)(?!.*--approver)( [^\\n]{1,2000})?$"
         },
         {
           "pattern": "s03ft",

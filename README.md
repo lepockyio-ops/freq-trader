@@ -1,120 +1,218 @@
-# freq-trader-framework
+# freq-trader：freqtrade 自动交易框架（Binance USDⓈ-M 永续 · 模板版 v2.2 · 策略留空）
 
-基于 **freqtrade 的 Binance USDⓈ-M 永续交易框架**。v2.0 将交易规则与执行、风控、监控和运维分开，供你接入自己的做多策略。
+这是一个基于 [freqtrade](https://www.freqtrade.io/) 2026.9、**不含交易策略的框架**，交易规则由你写成一个继承 `FrameworkStrategy` 的策略接入。框架已经提供：
 
-默认策略为 `MyStrategy` 空白模板，**不会产生入场信号**；默认配置 `dry_run: true`。均线示例仅用于检查框架流程，收益表现需要另行验证。仓库中的 `s03` / `s03ft` 是沿用的包名、命令和服务名。
+- 风控：止损护栏、按风险定仓、逐仓杠杆与强平距离、事件窗口、总风险与相关性、交易所端止损、Protections；
+- 监控告警、官方事件日历、复盘指标；
+- 研究前端：找想法、筛因子、统计检验；
+- 由 OpenClaw agent 运营，以及一键部署脚本。
 
-## 文档入口
+默认交易对是 BTC、ETH、SOL、BNB、HYPE 五个 USDT 永续，`dry_run = true`。默认策略是空白模板 `MyStrategy`：可以运行，但不会开任何仓位。
 
-- [v2.0 中文完整手册](%E4%BA%A4%E6%98%93%E6%A1%86%E6%9E%B6%E6%A8%A1%E6%9D%BF%E6%89%8B%E5%86%8C%EF%BC%88freqtrade%20%C2%B7%20%E7%AD%96%E7%95%A5%E7%95%99%E7%A9%BA%20v2.0%EF%BC%89.md)：交易流程、数据、验证门槛、风险与运维。
-- [框架说明](docs/FRAMEWORK.md)：框架与策略各自负责什么。
-- [策略规格模板](docs/STRATEGY_TEMPLATE.md)：编写策略前先明确规则、参数来源与验收标准。
-- [部署说明](deploy/README.md)：Linux 服务、权限、监控与密钥配置。
-- [OpenClaw 操作入口](OPENCLAW.md)：部署和日常命令。
+> **风险提示**：本仓库是研究与流程工具，不构成投资建议，不保证收益。任何策略都必须先通过 G1–G8 验证门槛，实盘（关闭 dry_run）只能由你本人操作（G9）。
 
-## 框架提供什么
+**你是 AI agent？** 先读 [`AGENTS.md`](AGENTS.md)。要把整套流程交给 OpenClaw 运营，读 [`OPENCLAW.md`](OPENCLAW.md)。
 
-| 模块 | 内容 |
-| --- | --- |
-| 策略基类 | `FrameworkStrategy`：策略接入接口、止损护栏、仓位与杠杆计算、入场检查 |
-| 风险与执行 | 总在险风险、相关性检查、事件窗口、交易所端止损、分批止盈、最长持有与 Protections |
-| 监控 | 行情、持仓、资金费率、参考价和数据中断告警；本机状态与暂停代理 |
-| 研究 | 按交易对、年份和方案拆分回测，重跑复核、汇总与前视/递归偏差检查 |
-| 事件与复盘 | 美联储、BLS、BEA 事件日历；程序计算复盘指标 |
-| 运维 | `s03ft` 命令、systemd 服务、安装脚本和 OpenClaw 工作区模板 |
+---
 
-## 本地安装
+## 目录
 
-以下命令使用 Linux / macOS 的 Bash。正式部署需要 Linux 与 systemd。
+1. [这个仓库能做什么、不能做什么](#1-这个仓库能做什么不能做什么)
+2. [准备环境](#2-准备环境)
+3. [10 分钟本地试跑（不需要任何密钥）](#3-10-分钟本地试跑不需要任何密钥)
+4. [配置清单：要改哪些文件](#4-配置清单要改哪些文件)
+5. [接入你的策略（3 步）](#5-接入你的策略3-步)
+6. [从想法到上线的完整流程](#6-从想法到上线的完整流程)
+7. [可选：接入 Vibe-Trading 找想法](#7-可选接入-vibe-trading-找想法)
+8. [部署到服务器、交给 OpenClaw 运营](#8-部署到服务器交给-openclaw-运营)
+9. [日常命令速查](#9-日常命令速查)
+10. [常见问题](#10-常见问题)
+11. [文档地图](#11-文档地图)
 
-仓库的命令行包要求 Python ≥ 3.11；freqtrade 部分固定依赖 `2026.9`，完整交易环境建议按手册使用 Python 3.12+。
+---
+
+## 1. 这个仓库能做什么、不能做什么
+
+| 能做 | 不能做 / 不会做 |
+|---|---|
+| 把你的交易规则变成 freqtrade 策略，回测、dry-run、实盘用同一份代码 | 替你想出能赚钱的策略；示例策略 `SmaCrossExample` 只用来验证框架能跑通 |
+| 对任何策略强制执行风控：止损距离 0.8–3%、单笔风险、总风险、强平距离 ≥ 3 倍止损、相关性、事件窗口、最长持有 | 让策略绕过这些风控 |
+| 研究前端：登记想法 → 筛因子（跨币种比较）→ 研究矩阵 → 统计检验（Deflated Sharpe、PBO 等） | 把统计检验“通过”当作收益保证 |
+| 由 OpenClaw agent 通过统一命令 `s03ft` 运维、研究、复盘 | 让 agent 接触交易所密钥、改配置、恢复交易或关闭 dry_run |
+
+阈值标注贯穿整个仓库：**用户设定** = 你决定；**示例值** = 默认值，未经验证；**经数据验证** = 有回测证据。
+
+## 2. 准备环境
+
+| 需要 | 版本 / 说明 | 必须？ |
+|---|---|---|
+| Linux（服务器按 Ubuntu / Debian 写）或 macOS | — | 是 |
+| Python | 3.11 及以上 | 是 |
+| freqtrade | 2026.9（`pip install -e ".[trade]"` 会装这个版本） | 是 |
+| 网络 | 能访问 Binance 合约 API。所在地区访问不了时，本地试跑用 `user_data/config-test-okx.json`（OKX 公开数据） | 是 |
+| Binance API Key | 只勾选“读取”和“合约交易”，**不开提现**，限制服务器 IP；只在 dry-run 之后需要 | 后期 |
+| OpenClaw | 2026.10.8 已验证；**需要 Node ≥ 24.22.1 或 ≥ 26.12.1** | 部署时 |
+| Vibe-Trading | `vibe-trading-ai==0.1.18`，装在独立虚拟环境 | 可选 |
+
+**密钥规则**：交易所 Key 只放在服务器上 root 0600 的 `/etc/s03/ft-trader.env`，不写进仓库，也不贴进任何聊天（包括发给 AI）。
+
+## 3. 10 分钟本地试跑（不需要任何密钥）
 
 ```bash
-git clone https://github.com/lepockyio-ops/freq-trader-framework.git
-cd freq-trader-framework
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[trade,test]"
-python -m pytest -q
+git clone <你的仓库地址> freq-trader && cd freq-trader
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[trade,test]"                     # 安装 freqtrade 2026.9 和统一命令 s03ft
+pytest -q                                          # 约 145 个测试；没有本地行情数据时，少数回测测试会跳过
+
+# 本地试跑用 OKX 公开数据（不需要账号）；有 Binance 访问的话把配置换成 user_data/config.json
+export S03_FT_CONFIG=user_data/config-test-okx.json
+freqtrade download-data -c $S03_FT_CONFIG --timeframes 1d 15m 1m --timerange 20250101- --trading-mode futures
+
+# 筛因子：5 个币 → 自动用跨币种比较，报告写到 research/lab/
+s03ft lab factors --tf 1d
+
+# 自检：空白模板时会有一项 ✗“仍是空白模板”，这是正常的
+s03ft doctor --research
+
+# 用示例策略回测，确认整条链路能跑通（结果不代表可交易）
+freqtrade backtesting -c $S03_FT_CONFIG --strategy SmaCrossExample --strategy-path examples/strategies \
+  --timerange 20261001- -p SOL/USDT:USDT BTC/USDT:USDT
 ```
 
-测试覆盖框架、模板、命令行、监控、事件和部署。涉及 freqtrade 或回测数据的测试，请按测试自身要求准备依赖和数据；测试通过也不等于策略有效。
+这几条命令在 2026-10-28 的一台干净机器上跑通过：5 个币的日线来自 OKX，HYPE 从 2025-02-21 上市起有数据。
 
-## 接入你的策略
+## 4. 配置清单：要改哪些文件
 
-1. 填写[策略规格模板](docs/STRATEGY_TEMPLATE.md)，确定市场条件、信号、止损、仓位、离场和验证标准。
-2. 修改 [MyStrategy.py](user_data/strategies/MyStrategy.py)，继承 [FrameworkStrategy](user_data/strategies/framework_base.py)：
-   - 用 `populate_indicators()` 计算指标。
-   - 用 `populate_entry_trend()` 设置 `enter_long` 和绝对止损价 `fw_stop`，可选 `fw_entry_cap` 限定计划入场价。
-   - 按需实现 `take_profit_legs()`、`strategy_exit()` 或 `populate_exit_trend()`。
-3. 完成规则后移除 `is_template = True` 或设为 `False`。若更换类名，同步修改 `user_data/config.json` 的 `strategy`。
-4. 核对策略周期与配置：模板类使用 `15m`，当前配置文件写的是 `1m`，运行前应按策略需求统一。
-5. 完成测试、数据准备、回测和偏差检查，再进入 dry-run 验证。
+| 文件 | 改什么 | 谁来改 | 默认 |
+|---|---|---|---|
+| `user_data/config.json`（部署后是 `/etc/s03/ft-config.json`） | `"strategy"`（你的策略类名）、`pair_whitelist`（交易对）、`max_open_trades`、`stake_currency` | 你 | `MyStrategy`；5 个交易对；最多 3 笔；`dry_run: true` |
+| `user_data/strategies/MyStrategy.py` | 你的策略 | 你 | 空白模板 |
+| `user_data/strategies/framework_base.py` 的 `FW_DEFAULTS` | 框架风险参数（单笔风险、总风险、杠杆上限、维持保证金估计）；也可以在策略的 `framework_params()` 里覆盖 | 你（谨慎） | 均为示例值 |
+| `/etc/s03/ft-trader.env` | Binance API Key、freqtrade API 账号（`install.sh` 生成模板） | 只能是你 | 空 |
+| `/etc/s03/events.env`、`/etc/s03/heartbeat.env` | BLS 要求的联系邮箱、外部心跳地址 | 你 | 空 |
+| `monitor/monitor.toml`（由 `monitor.example.toml` 复制） | 告警阈值、交易对 | 你 | 5 个交易对，示例阈值 |
+| OpenClaw 配置（合并 `deploy/openclaw/openclaw.s03.json5`） | hooks token、模型 id；装了 Vibe-Trading 时把 `mcp.servers["vibe-trading"].enabled` 改为 `true` | 你 | Vibe-Trading 关闭 |
+| `/etc/s03/vibe-trading.env` | 只放大模型配置，绝不放交易所密钥 | 你 | 不填也能用因子库和行情工具 |
 
-[均线示例](examples/strategies/SmaCrossExample.py)可用于了解接口。准备所需历史数据后，可单独回测：
+**增减交易对**：同时改 `config.json` 的 `pair_whitelist` 和 `monitor/monitor.toml` 的 `pairs`。新币可以在 `framework_base.py` 的 `maint_margin_est` 里补维持保证金率（以 Binance 杠杆档位表为准），否则用 `_default` 估计值。
+筛因子默认用跨币种比较，至少要 5 个币；少于 5 个时自动改用单币择时口径（时间序列 IC）。
 
-```bash
-freqtrade backtesting -c user_data/config.json \
-  --strategy SmaCrossExample --strategy-path examples/strategies
+## 5. 接入你的策略（3 步）
+
+1. **写规格**：填 `docs/STRATEGY_TEMPLATE.md`，包括适用市场、入场信号、止损、仓位、离场、失效条件和对应的想法 id。
+2. **改策略**：编辑 `user_data/strategies/MyStrategy.py`。
+   - 设置 `timeframe`。
+   - 在 `populate_entry_trend()` 里写 `enter_long = 1` 和 `fw_stop`（绝对止损价），按需写 `fw_entry_cap`。
+   - 按需实现 `take_profit_legs()`（分批止盈）和 `strategy_exit()`（策略自己的离场）。
+   - **删掉 `is_template = True`**；改了类名就同步修改配置里的 `"strategy"`。
+3. **验证**：依次运行 `pytest -q` → `s03ft research g0`（前视偏差检查）→ 研究矩阵 → 统计检验（第 6 节）。
+
+接口说明在 `docs/FRAMEWORK.md`，可参考 `examples/strategies/SmaCrossExample.py` 的写法。
+
+## 6. 从想法到上线的完整流程
+
+```
+登记想法 → 筛因子 → 写成策略 → G0 偏差检查 → 研究矩阵 → 统计检验 → 你批准 → dry-run ≥ 4 周 → 你关闭 dry_run（小额）
+ lab idea   lab factors          research g0    research run  lab matrix  idea move    s03-freqtrade
 ```
 
-## 研究与验证
-
-在仓库根目录执行；先准备对应市场、周期和时间范围的历史数据。下面的 `--job` 是矩阵任务编号示例。
-
 ```bash
-s03ft research plan --pairs BTC,ETH,SOL,BNB --years 2022-2025 --variants base,stop_floor,cost2x
-s03ft research run --job SOL-2023-base
-s03ft research verify --job SOL-2023-base
-s03ft research aggregate
+# ① 登记想法：假设、机制、证伪条件三项必填
+s03ft lab idea add --title "…" --hypothesis "…" --mechanism "…" --falsification "…" --source human
+
+# ② 筛因子（5 个币，跨币种比较；只有 alive / reversed 且 FDR 显著才算候选）
+s03ft lab factors --tf 1d --horizon 3
+
+# ③ 写成策略后：偏差检查 + 研究矩阵（逐笔 R 另存 research/results/trades/）
 s03ft research g0 --timerange 20250101-
+s03ft research plan --pairs BTC,ETH,SOL,BNB,HYPE --years 2023-2025 --variants base,stop_floor,cost2x
+s03ft research run --job BTC-2024-base             # 对 research/jobs.json 里每一格执行
+s03ft research aggregate
+
+# ④ 统计检验：期望 R 区间、符号翻转、滚动分段、Deflated Sharpe、PBO、成本压力
+s03ft lab matrix
+
+# ⑤ 批准（只能由你在终端执行；s03ft 会拒绝 --by human）
+python -m fwresearch idea move --id I-… --to approved --reason "已审阅报告" --by human --approver <你的名字>
 ```
 
-策略名默认读取 `user_data/config.json`；也可用 `FW_STRATEGY`、`FW_STRATEGY_PATH` 指定策略与路径，用 `S03_FT_CONFIG` 指定配置。
+之后按 `deploy/README.md` 的上线前演练运行 dry-run 至少 4 周（G8），再由你决定是否关闭 dry_run（G9）。
 
-验证按手册的 G0–G9 推进，包括偏差检查、样本量、样本外与滚动验证、参数稳健性、成本压力、极端情景、代码一致性和模拟运行。实盘是独立阶段，需要人工授权。
+## 7. 可选：接入 Vibe-Trading 找想法
 
-## 监控与部署
+[Vibe-Trading](https://github.com/HKUDS/Vibe-Trading) 提供大模型研究、多智能体讨论、读网页 / 文档和 478 个因子。本框架通过一个白名单代理（`mcp-guard`）把它接给 OpenClaw 研究 agent：
 
-本地监控配置从 [monitor.example.toml](monitor/monitor.example.toml) 复制，并配置 freqtrade API 账号：
+- 只放行 26 个研究工具；交易、连接器、写文件类工具一律拒绝；
+- 不传任何交易所密钥；
+- 每次调用写审计日志。
 
 ```bash
-cp monitor/monitor.example.toml monitor/monitor.toml
-python monitor/run_monitor.py alerts
-# 在另一个终端运行本机代理
-python monitor/run_monitor.py gate
+sudo bash deploy/install.sh --with-vibe-trading    # 另建 /opt/s03/vt-venv（约 1.1 GB），安装 0.1.18 并自动运行自检
+sudo editor /etc/s03/vibe-trading.env              # 只填大模型配置（多智能体讨论需要；因子库和行情不需要）
+
+s03ft lab vt-check                                 # 自检：版本、因子库桥接、MCP 握手、白名单、拒绝交易工具、密钥过滤
+VT_PYTHON=/opt/s03/vt-venv/bin/python s03ft lab factors --zoo all   # 内置 55 个 + Vibe-Trading 408 个因子
 ```
 
-告警分析可选接入 OpenClaw，默认关闭。告警分析端经代理可查看状态、暂停新开仓；运维角色的启停权限由 systemd、sudoers 和工作区配置限定。密钥按部署文档在本机配置，勿提交到 Git。
+然后在 OpenClaw 配置里把 `mcp.servers["vibe-trading"].enabled` 改为 `true`，运行 `openclaw mcp probe vibe-trading`，应显示 26 个工具。
+完整的验证记录（哪些配置因实测而修改）见 `docs/RESEARCH_LAB.md` 的“安装验证记录”。
 
-Linux 服务器部署入口：
+Vibe-Trading 只用于找想法和粗筛。它的回测按“下一根开盘调仓”成交、不模拟止损单；它的加密行情是 OKX 现货、按 UTC+8 切日。所以上线证据一律以 freqtrade 回测为准。
+
+## 8. 部署到服务器、交给 OpenClaw 运营
 
 ```bash
-sudo bash deploy/install.sh
-s03ft doctor --json
-s03ft status --json
+sudo bash deploy/install.sh [--with-vibe-trading]   # 可重复运行；不覆盖已有的密钥与配置
+sudo editor /etc/s03/ft-trader.env                  # 填 Binance API Key（不开提现、限制 IP）
+openclaw config patch --file /etc/s03/openclaw-templates/openclaw.s03.json5 --dry-run   # 先校验
+openclaw config patch --file /etc/s03/openclaw-templates/openclaw.s03.json5             # 再合并
+openclaw approvals set --file /etc/s03/openclaw-templates/exec-approvals.s03.json        # 命令白名单
+openclaw doctor
+sudo systemctl start s03-events s03-ft-gate s03-ft-monitor s03-freqtrade
+sudo -u openclaw s03ft doctor
 ```
 
-安装脚本要求已存在 OpenClaw 用户，可用 `--openclaw-user` 指定。它安装代码、服务与定时任务，生成缺失配置和 token；交易所密钥、OpenClaw 主配置合并和交易服务启动仍需按[部署说明](deploy/README.md)完成。
+细节、4 个 agent 的分工和安全边界见 [`OPENCLAW.md`](OPENCLAW.md) 与 [`deploy/README.md`](deploy/README.md)。
+分工原则：**agent 通过 `s03ft` 操作一切，交易决策只由策略完成，上线、恢复、改参数只由你操作。**
 
-## 目录导航
+## 9. 日常命令速查
 
-| 路径 | 用途 |
-| --- | --- |
-| [user_data/strategies/](user_data/strategies/) | 框架基类与空白策略 |
-| [user_data/config.json](user_data/config.json) | Binance 逐仓期货、默认策略与 dry-run 配置 |
-| [examples/strategies/](examples/strategies/) | 示例策略 |
-| [monitor/](monitor/) | 监控、代理、事件日历与复盘指标 |
-| [research/matrix.py](research/matrix.py) | 回测矩阵与偏差检查 |
-| [s03ft/](s03ft/) | 统一命令行 |
-| [deploy/](deploy/) | 安装、服务、权限与 OpenClaw 模板 |
-| [tests/](tests/) | 测试与离线日历样本 |
+| 目的 | 命令 |
+|---|---|
+| 自检 / 状态 / 每日例行 | `s03ft doctor` / `s03ft status` / `s03ft daily` |
+| 启停服务 | `s03ft svc start|stop|restart freqtrade|monitor|gate` |
+| 暂停新开仓（恢复只能由你在 FreqUI 或 API 操作） | `s03ft gate pause "原因"` |
+| 研究矩阵 / 偏差检查 | `s03ft research plan|run|aggregate|verify|g0` |
+| 筛因子 / 统计检验 / 想法 | `s03ft lab factors` / `s03ft lab matrix` / `s03ft lab idea list` |
+| Vibe-Trading 自检 | `s03ft lab vt-check` |
+| 复盘指标 | `s03ft metrics` |
+| 跑测试 | `s03ft test` 或 `pytest -q` |
 
-## 使用边界
+## 10. 常见问题
 
-- 当前模板面向做多策略。风险阈值是待校准的配置起点，不能替代策略验证。
-- 止损护栏按计划入场价检查；实际成交价格会影响最终止损距离。
-- 杠杆计算中的维持保证金率估计应与交易所档位核对；资金费与参考价告警不等于策略入场过滤。
-- Binance 行情连接、API 返回的止损状态和交易所端订单行为仍需在目标环境验证。
-- 本仓库提供研究与执行工具，不保证策略收益。
+| 现象 | 原因与处理 |
+|---|---|
+| `s03ft doctor` 显示“仍是空白模板” | 正常：还没接入策略。接入后删掉 `is_template = True` |
+| 下载数据返回 451 或 “restricted location” | 所在地区访问不了 Binance。本地研究用 `S03_FT_CONFIG=user_data/config-test-okx.json`；实盘服务器必须能访问 Binance |
+| `lab factors` 报“缺少这些标的的数据：HYPE…” | 先下载：`freqtrade download-data -c $S03_FT_CONFIG --pairs HYPE/USDT:USDT --timeframes 1d --trading-mode futures` |
+| 截面样本从 2025-02 才开始 | HYPE 永续 2025-02-21 才在 OKX 上市，跨币种比较只用 5 个币**同时**有数据的日期 |
+| 因子显示 `insufficient` | IC 观测太少（截面 < 60、时间序列 < 12 个月）。资金费因子常见：OKX 只能下载约 3 个月资金费率 |
+| 所有因子都是 dead | 不到两年的数据、5 个高度相关的币，本来就很难有显著结论。不要为了出结果去调阈值 |
+| `lab matrix` 报“没有逐笔文件” | 先 `s03ft research run --job …`；逐笔 R 保存在 `research/results/trades/` |
+| `openclaw` 提示 Node 版本不支持 | 2026.10.8 需要 Node ≥ 24.22.1 或 ≥ 26.12.1 |
+| `openclaw doctor` 提示沙箱会过滤 MCP 工具 | 用仓库里最新的 `openclaw.s03.json5`：研究 agent 已加 `tools.sandbox.tools.alsoAllow: ["vibe-trading__*"]` |
+| `vt-check` 的 `mcp_tools.missing_from_upstream` 不为空 | Vibe-Trading 升级后改了工具名；回到 0.1.18，或同步更新 `fwresearch/mcp_guard.py` 的白名单并重跑测试 |
+
+## 11. 文档地图
+
+| 文档 | 内容 |
+|---|---|
+| [`AGENTS.md`](AGENTS.md) | 给 AI agent 的操作守则与任务命令 |
+| [`OPENCLAW.md`](OPENCLAW.md) | 交给 OpenClaw 运营：组成、4 个 agent、落地步骤、安全边界 |
+| [`docs/FRAMEWORK.md`](docs/FRAMEWORK.md) | 框架与策略的分工、`FrameworkStrategy` 接口 |
+| [`docs/STRATEGY_TEMPLATE.md`](docs/STRATEGY_TEMPLATE.md) | 策略规格填写模板（含验证门槛 G0–G9） |
+| [`docs/RESEARCH_LAB.md`](docs/RESEARCH_LAB.md) | 研究前端：流程、统计检验、因子口径、Vibe-Trading 安装验证记录 |
+| [`docs/REFERENCE.md`](docs/REFERENCE.md) | 文件清单、已验证项、监控告警、已知问题 |
+| [`docs/manual-freqtrade.md`](docs/manual-freqtrade.md) | 完整交易流程手册（第 1–16 节） |
+| [`deploy/README.md`](deploy/README.md) | 部署细节与上线前演练 |
+| [`fwresearch/NOTICE.md`](fwresearch/NOTICE.md) | 移植代码的来源与许可（Vibe-Trading，MIT） |

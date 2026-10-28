@@ -1,6 +1,6 @@
-# freqtrade 交易流程手册（框架版 v2.0 · 策略留空）
+# 交易框架模板手册（freqtrade · 策略留空 v2.2）
 
-Oct 26, 2026 · @Pocky
+Oct 28, 2026 · @Pocky
 
 ## 结论摘要
 
@@ -430,6 +430,43 @@ freq-trader 仓库现在是一套可部署的库：agent 只通过一个命令 `
 **你需要做的 4 件事：** 填 Binance API Key（不开提现、限制 IP）、BLS 联系邮箱、心跳地址；合并 OpenClaw 配置并导入命令白名单；首次启动服务并运行 `s03ft doctor`；完成 10 项上线前演练。
 
 **验证：** 全包 53 个测试通过，其中新增：命令行 6 个（拒绝白名单外参数、提权命令与 sudoers 一一对应、每日汇总）、部署脚本 1 个（装到假根目录，密钥文件权限正确、重复运行不覆盖密钥）。在真实服务器和真实 OpenClaw 上尚未测试（未知）。
+
+## 16. 研究前端（v2.2）：找想法、筛因子、统计检验
+
+v2.1 把 [Vibe-Trading](https://github.com/HKUDS/Vibe-Trading)（MIT）的三项强项接进了框架，入口是 `s03ft lab …`，代码在 `fwresearch/`（与 Hyperliquid 模板共用）。回测仍用 freqtrade（止损按 K 线内触发）；Vibe-Trading 的回测不模拟止损单，只用于粗筛。
+
+| 环节 | 命令 / 工具 | 说明 |
+| --- | --- | --- |
+| 找想法 | MCP 服务器 `vibe-trading`（经 `mcp-guard`） | 只给 `s03-research`；放行 26 个研究工具，交易类一律拒绝 |
+| 登记 | `s03ft lab idea add` | 假设、机制、证伪条件必填；记录只追加 |
+| 筛因子 | `s03ft lab factors` | 默认读配置里交易所的 `user_data/data/<交易所>/futures`；内置 55 个因子，可选 `--zoo all` |
+| 回测 | `s03ft research run --job …` | 逐笔 R 另存 `research/results/trades/` |
+| 统计检验 | `s03ft lab matrix` | Bootstrap、符号翻转、滚动分段、Deflated Sharpe、PBO、成本压力 |
+| 批准 | `python -m fwresearch idea move … --by human` | 只能由你在终端执行；`s03ft lab` 会拒绝 |
+
+**统计门槛（示例值，补充 G1 / G3 / G4 / G5，已写入仓库 docs/STRATEGY\_TEMPLATE.md 第 10 节）：** 期望 R 的 Bootstrap 95% 区间下限 > 0；符号翻转检验 p < 0.05；滚动分段中期望 R > 0 的段数 ≥ 60%；按尝试次数折扣后 Deflated Sharpe > 0.95；PBO < 0.5。Monte Carlo 排列只报告回撤路径，不判定优势。
+
+**逐笔 R 的口径：** R = 盈亏 ÷（入场成交数量 ×（开仓价 − stop\_loss\_abs）），与复盘指标同一口径。分批平仓后 amount 会变小，所以用入场订单的成交量。
+
+**已核验事实：** Deflated Sharpe、PBO、BH 多重检验与截面 IC 的计算结果，与 Vibe-Trading 原代码（提交 d01ea76）逐项比对一致。用测试环境的 OKX 数据端到端跑通：研究矩阵 → 逐笔 R → `s03ft lab matrix`。样本只有 3 周，结论为“证据不足”。
+
+**v2.2：加入 HYPE/USDT，默认用跨币种比较。** `pair_whitelist` 与监控交易对加入 `HYPE/USDT:USDT`（共 5 个；维持保证金率估计 2.5%，示例值，上线前按 Binance 杠杆档位表核对）。满 5 个币时 `s03ft lab factors` 自动用截面 IC，检验“在几个币之间挑强弱”；择时型策略加 `--mode time_series`。只有 5 个币同时有数据的日期才计入（HYPE 永续在 OKX 2025-02-21 上市）；观测数不足（截面 < 60）的因子记为“样本不足”。真实数据试跑（613 个日期，463 个因子）：0 个通过 FDR。
+
+**v2.2 安装验证（2026-10-28，vibe-trading-ai 0.1.18 + OpenClaw 2026.10.8）与因此修改的配置：**
+
+| 项目 | 实测 | 处理 |
+| --- | --- | --- |
+| MCP 握手与白名单 | 82 个工具中放行 26 个；交易、模拟盘、写文件工具均被拒绝；密钥未传入 | 无 |
+| 因子库桥接 | pickle 跨环境失败；83 个因子缺 vwap / amount 列 | 改用 npz + JSON；近似补列（模型推断） |
+| OpenClaw 沙箱闸门 | doctor 告警：MCP 工具会被沙箱过滤 | 研究 agent 加 `tools.sandbox.tools.alsoAllow: ["vibe-trading__*"]` |
+| Codex 投射范围 | 不写时投射给所有 Codex 运行时 agent | 加 `codex: { agents: ["s03-research"] }` |
+| 安装脚本 | — | `install.sh --with-vibe-trading` 装完自动运行 `s03ft lab vt-check` |
+| 环境要求 | OpenClaw 2026.10.8 需 Node ≥ 24.22.1 或 ≥ 26.12.1；Vibe-Trading 需 Python ≥ 3.11 | 写入 README |
+| 未验证 | `run_swarm` 需要大模型配置；`web_search` 在验证机网络下无结果；Binance 在验证机所在地区不可访问 | 待你在自己的服务器上确认 |
+
+完整记录见仓库 `docs/RESEARCH_LAB.md`；新手与 agent 的快速上手见仓库 `README.md` 和 `AGENTS.md`。
+
+**安装（可选）：** `sudo bash deploy/install.sh --with-vibe-trading` 会另建 `/opt/s03/vt-venv`（固定 vibe-trading-ai==0.1.18）并安装 `s03-vt-mcp`。在 `/etc/s03/vibe-trading.env` 只填大模型配置，再把 OpenClaw 配置里的 `mcp.servers["vibe-trading"].enabled` 改为 true。不装也能用筛因子、统计检验和想法登记簿。详见仓库 `docs/RESEARCH_LAB.md`。
 
 ## 来源
 

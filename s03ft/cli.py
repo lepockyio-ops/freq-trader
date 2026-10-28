@@ -9,6 +9,8 @@
   s03ft gate status | gate pause <原因>       白名单代理：查看状态 / 暂停新开仓
   s03ft events build --out FILE [--history]   从美联储、BLS、BEA 官方日程生成事件文件
   s03ft research plan|run|verify|aggregate|g0 [参数…]   研究矩阵（freqtrade 回测）
+  s03ft lab factors|stats|matrix|idea [参数…]  研究前端：筛因子、统计检验、想法登记簿（docs/RESEARCH_LAB.md）
+  s03ft lab vt-check [--vt-bin DIR]           Vibe-Trading 安装自检（默认 /opt/s03/vt-venv/bin）
   s03ft metrics [--json]                      读取程序算好的复盘指标
   s03ft test                                  运行测试
 
@@ -292,6 +294,30 @@ def cmd_research(a) -> int:
     return r.returncode
 
 
+def _ft_data_dir() -> str:
+    """config 里的交易所名 → freqtrade 的期货数据目录。"""
+    cfg = Path(os.environ.get("S03_FT_CONFIG", "user_data/config.json"))
+    try:
+        name = json.loads(cfg.read_text("utf-8"))["exchange"]["name"]
+    except (OSError, ValueError, KeyError):
+        name = "binance"
+    return f"user_data/data/{name}/futures"
+
+
+def cmd_lab(a) -> int:
+    """研究前端（fwresearch）。agent 经这里调用：不允许以人的身份批准想法（--by human / --approver）。"""
+    args = [a.sub, *a.args]
+    if "--by" in args and args[args.index("--by") + 1:args.index("--by") + 2] == ["human"] or "--approver" in args:
+        print(json.dumps({"error": "批准想法只能由人在终端用 python -m fwresearch idea move … --by human 执行"},
+                         ensure_ascii=False))
+        return 2
+    if a.sub == "factors" and "--source" not in args:
+        args += ["--source", "freqtrade", "--data-dir", _ft_data_dir()]
+    from fwresearch.__main__ import main as fw_main
+
+    return fw_main(args)
+
+
 def cmd_metrics(a) -> int:
     m = metrics_info()
     md = INBOX / "metrics.md"
@@ -335,6 +361,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("sub", choices=["plan", "run", "verify", "aggregate", "g0"])
     p.add_argument("args", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_research)
+    p = sub.add_parser("lab")
+    p.add_argument("sub", choices=["factors", "stats", "matrix", "idea", "vt-check"])
+    p.add_argument("args", nargs=argparse.REMAINDER)
+    p.set_defaults(fn=cmd_lab)
     p = sub.add_parser("metrics")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_metrics)

@@ -33,7 +33,7 @@ OKX = "https://www.okx.com/api/v5/market/ticker"
 
 @dataclass(frozen=True)
 class MonitorConfig:
-    pairs: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT")
+    pairs: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT", "HYPE/USDT:USDT")
     ws_base: str = "wss://fstream.binance.com/market/stream"   # Binance 2026 年起的新路径；以官方公告为准
     rest_base: str = FAPI
     ft_api_url: str = "http://127.0.0.1:8080"                 # freqtrade api_server 地址

@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # S-03 freqtrade 一键部署（以 root 在你的 Linux 服务器上运行；可重复运行，不会覆盖已有的密钥与配置）。
 #
-#   sudo bash deploy/install.sh [--openclaw-user openclaw] [--prefix /tmp/fakeroot]
+#   sudo bash deploy/install.sh [--openclaw-user openclaw] [--with-vibe-trading] [--prefix /tmp/fakeroot]
 #
 # 做的事：建用户与目录 → 安装 freqtrade 2026.9 与 s03ft → 生成配置与随机 token（只在文件不存在时）
 #        → 安装 systemd、sudoers、小工具 → 放置 4 个 OpenClaw agent 的工作区与技能 → enable 定时器 → 自检
 # 不做的事：不填交易所 API Key、不启动 freqtrade、不改 dry_run、不修改你的 OpenClaw 主配置。
+# --with-vibe-trading：另建 /opt/s03/vt-venv 安装 Vibe-Trading（研究前端找想法用，经 mcp-guard 白名单代理，只给 s03-research）。
 # --prefix 只用于测试：把所有文件装到一个假根目录，跳过建用户、chown、systemctl、visudo。
 set -euo pipefail
 
 OC_USER="openclaw"
 PREFIX=""
+WITH_VT=0
+VT_VERSION="0.1.18"                           # 固定版本；升级前先在研究机上跑 tests/test_fwresearch.py
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --openclaw-user) OC_USER="$2"; shift 2 ;;
     --prefix) PREFIX="${2%/}"; shift 2 ;;
+    --with-vibe-trading) WITH_VT=1; shift ;;
     *) echo "未知参数：$1"; exit 2 ;;
   esac
 done
@@ -49,6 +53,11 @@ if ! fake; then
   /opt/s03/venv/bin/pip install -q --upgrade pip
   /opt/s03/venv/bin/pip install -q -e "/opt/s03/ft-s03[trade]"
   ln -sf /opt/s03/venv/bin/s03ft /usr/local/bin/s03ft
+  if [[ $WITH_VT == 1 ]]; then
+    [[ -x /opt/s03/vt-venv/bin/python ]] || python3 -m venv /opt/s03/vt-venv
+    /opt/s03/vt-venv/bin/pip install -q --upgrade pip
+    /opt/s03/vt-venv/bin/pip install -q "vibe-trading-ai==$VT_VERSION"
+  fi
   chown -R root:root /opt/s03 && chmod -R go-w /opt/s03
 fi
 
@@ -96,14 +105,16 @@ if newfile "$E/openclaw-gate.env"; then
 fi
 if newfile "$E/events.env"; then install -m 0644 "$SRC/deploy/env/events.env.example" "$E/events.env"; fi
 if newfile "$E/heartbeat.env"; then install -m 0600 "$SRC/deploy/env/heartbeat.env.example" "$E/heartbeat.env"; fi
+if newfile "$E/vibe-trading.env"; then install -m 0640 "$SRC/deploy/env/vibe-trading.env.example" "$E/vibe-trading.env"; fi
 chmod 0600 "$E"/*.env 2>/dev/null || true; chmod 0644 "$E/events.env"
+chmod 0640 "$E/vibe-trading.env"; own "root:$OC_USER" "$E/vibe-trading.env"     # Gateway（openclaw 用户）启动 MCP 时要读
 
 say "4/8 工作目录（复盘收件箱、研究副本）"
-install -d -m 0750 "$R/srv/s03-review" "$R/srv/s03-research"
+install -d -m 0750 "$R/srv/s03-review" "$R/srv/s03-research" "$R/srv/s03-research/vt-runs" "$R/srv/s03-research/research/lab"
 install -d -m 2750 "$R/srv/s03-review/inbox"
 own "$OC_USER:$OC_USER" "$R/srv/s03-review" "$R/srv/s03-research"
 own "s03trader:$OC_USER" "$R/srv/s03-review/inbox"
-for d in user_data tests monitor research examples s03ft pyproject.toml docs; do
+for d in user_data tests monitor research examples s03ft fwresearch pyproject.toml docs; do
   [[ -e "$R/srv/s03-research/$d" ]] || cp -r "$SRC/$d" "$R/srv/s03-research/"
 done
 rm -rf "$R/srv/s03-research/user_data/data" "$R/srv/s03-research/user_data/config-private.example.json"
@@ -111,7 +122,7 @@ fake || chown -R "$OC_USER:$OC_USER" /srv/s03-research
 
 say "5/8 小工具、systemd 服务、sudoers"
 install -D -m 0755 "$SRC/deploy/bin/s03-gate"       "$R/usr/local/bin/s03-gate"
-for b in s03-hook s03-ft-export s03-heartbeat; do install -D -m 0755 "$SRC/deploy/bin/$b" "$R/usr/local/lib/s03/$b"; done
+for b in s03-hook s03-ft-export s03-heartbeat s03-vt-mcp; do install -D -m 0755 "$SRC/deploy/bin/$b" "$R/usr/local/lib/s03/$b"; done
 install -d "$R/etc/systemd/system" && install -m 0644 "$SRC"/deploy/systemd/* "$R/etc/systemd/system/"
 install -d "$R/etc/sudoers.d"
 if fake; then
@@ -145,6 +156,11 @@ fi
 
 say "8/8 自检"
 if ! fake; then sudo -u "$OC_USER" /usr/local/bin/s03ft doctor || true; fi
+if ! fake && [[ $WITH_VT == 1 ]]; then
+  # Vibe-Trading 自检：版本、因子库桥接、MCP 握手、白名单（26 个工具）、拒绝交易工具、密钥过滤
+  sudo -u "$OC_USER" env VIBE_TRADING_HOME=/srv/s03-research/.vibe-trading /usr/local/bin/s03ft lab vt-check || \
+    echo "Vibe-Trading 自检未全部通过：看上面 JSON 里 ok=false 的项，说明见 docs/RESEARCH_LAB.md"
+fi
 
 cat <<EOF
 
@@ -154,4 +170,6 @@ cat <<EOF
      导入 exec-approvals.s03.json，然后 openclaw doctor。
   3. 首次启动由你执行：systemctl start s03-ft-gate s03-ft-monitor s03-freqtrade，再以 $OC_USER 用户运行 s03ft doctor。
   4. dry_run 默认为 true；改为 false 属于 G9，只能由你在 /etc/s03/ft-config.json 中修改并重启。
+  5. （可选）研究前端找想法：用 --with-vibe-trading 重跑本脚本，在 /etc/s03/vibe-trading.env 填大模型配置，
+     再把 OpenClaw 配置里 mcp.servers["vibe-trading"].enabled 改为 true。说明见 docs/RESEARCH_LAB.md。
 EOF

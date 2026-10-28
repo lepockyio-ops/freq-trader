@@ -40,7 +40,7 @@ FW_DEFAULTS = {
     "funding_est": 0.0001 * 3 * 10,                 # 每 8 小时 0.01% × 10 天
     "funding_cap_frac_of_stop": 0.2,                # 资金费预留不超过止损距离的 20%
     # Binance 维持保证金率随档位变化；这里取偏保守的估计值，上线前用交易所档位表核对
-    "maint_margin_est": {"BTC": 0.004, "ETH": 0.005, "SOL": 0.01, "BNB": 0.01, "_default": 0.025},
+    "maint_margin_est": {"BTC": 0.004, "ETH": 0.005, "SOL": 0.01, "BNB": 0.01, "HYPE": 0.025, "_default": 0.025},
     "stop_min_pct": 0.8,
     "stop_max_pct": 3.0,
     "stop_min_mode": os.environ.get("S03_STOP_MIN_MODE", "skip"),   # skip / floor；研究矩阵用环境变量切换
