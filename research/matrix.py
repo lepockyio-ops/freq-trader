@@ -86,7 +86,7 @@ def freqtrade_bin() -> str:
 def backtest(jid: str, outdir: Path) -> dict:
     base, year, variant = parse_job(jid)
     env_extra, args = VARIANTS[variant]
-    env = {**os.environ, "S03_EVENTS_REQUIRED": "0", **env_extra}
+    env = {**os.environ, "S03_EVENTS_REQUIRED": "0", "S03_NEWS_FILE": "", **env_extra}   # 回测不应用新闻守卫（没有历史）
     outdir.mkdir(parents=True, exist_ok=True)
     cmd = [freqtrade_bin(), "backtesting", "-c", CONFIG, *strategy_args(),
            "--timerange", f"{year}0101-{year + 1}0101", "-p", f"{base}/USDT:USDT", "--enable-protections",

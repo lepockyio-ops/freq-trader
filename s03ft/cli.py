@@ -11,6 +11,7 @@
   s03ft research plan|run|verify|aggregate|g0 [参数…]   研究矩阵（freqtrade 回测）
   s03ft lab factors|stats|matrix|idea [参数…]  研究前端：筛因子、统计检验、想法登记簿（docs/RESEARCH_LAB.md）
   s03ft lab vt-check [--vt-bin DIR]           Vibe-Trading 安装自检（默认 /opt/s03/vt-venv/bin）
+  s03ft lab news check|blocks|daily|backfill|replay …  新闻（Odaily + BlockBeats）：自检、当前守卫、每日汇总、历史回填、守卫回放
   s03ft metrics [--json]                      读取程序算好的复盘指标
   s03ft test                                  运行测试
 
@@ -109,6 +110,22 @@ def gate_call(action: str, reason: str = "") -> dict:
         return {"ok": False, "error": f"HTTP {e.code}"}
     except (urllib.error.URLError, OSError) as e:
         return {"ok": False, "error": f"代理不可用：{type(e).__name__}"}
+
+
+NEWS_FILE = Path(os.environ.get("S03_NEWS_FILE", "/var/lib/s03-news/news_blocks.json"))
+
+
+def news_info(path: Path = NEWS_FILE) -> dict:
+    """新闻事件守卫的状态：disabled（未启用）/ ok / degraded（一个来源失败，封禁照常）/ stale（过期，交易程序已忽略）/ error。"""
+    from fwresearch.blockbeats import load_blocks
+
+    blocks, status = load_blocks(str(path))
+    try:
+        sources = json.loads(path.read_text("utf-8")).get("sources", {})
+    except (OSError, ValueError):
+        sources = {}
+    return {"status": status, "file": str(path), "sources": sources,
+            "blocks": [{k: b[k] for k in ("target", "category", "until_utc", "title")} for b in blocks]}
 
 
 def events_info(path: Path = EVENTS) -> dict:
@@ -226,8 +243,8 @@ def cmd_doctor(a) -> int:
 
 def cmd_status(a) -> int:
     obj = {"ok": True, "strategy": strategy_info(), "services": {k: unit_state(u) for k, u in UNITS.items()},
-           "gate": gate_call("status"), "events": events_info(), "metrics": metrics_info(),
-           "alerts_24h": alerts_24h()}
+           "gate": gate_call("status"), "events": events_info(), "news_guard": news_info(),
+           "metrics": metrics_info(), "alerts_24h": alerts_24h()}
     obj["ok"] = all(v == "active" for v in obj["services"].values() if not v.startswith("unknown"))
     return emit(obj, True)
 
@@ -362,7 +379,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("args", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_research)
     p = sub.add_parser("lab")
-    p.add_argument("sub", choices=["factors", "stats", "matrix", "idea", "vt-check"])
+    p.add_argument("sub", choices=["factors", "stats", "matrix", "idea", "vt-check", "news"])
     p.add_argument("args", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_lab)
     p = sub.add_parser("metrics")

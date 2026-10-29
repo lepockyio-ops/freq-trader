@@ -49,3 +49,12 @@ def test_lab_factors_reads_freqtrade_data_dir(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     out = json.loads(r.stdout.strip().splitlines()[-1])
     assert out["mode"] == "time_series" and Path(out["markdown"]).exists()
+
+
+def test_status_reports_news_guard_and_lab_news(tmp_path):
+    r = _s03ft("lab", "news", "blocks", "--guard-out", str(tmp_path / "none.json"))
+    assert r.returncode == 0 and json.loads(r.stdout)["status"] == "disabled"
+    sys.path.insert(0, str(ROOT))
+    from s03ft import cli
+
+    assert cli.news_info(tmp_path / "none.json")["status"] == "disabled"

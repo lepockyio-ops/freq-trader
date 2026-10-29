@@ -18,16 +18,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 from pandas import DataFrame
 
 from freqtrade.persistence import Trade
 from freqtrade.strategy import IStrategy, stoploss_from_absolute
+
+logger = logging.getLogger(__name__)
 
 # ============================================================== 框架参数（示例值）
 FW_DEFAULTS = {
@@ -51,6 +54,11 @@ FW_DEFAULTS = {
     "event_file": os.environ.get("S03_EVENTS_FILE", ""),
     "event_file_max_age_days": 3.0,
     "event_file_required": os.environ.get("S03_EVENTS_REQUIRED", "1") == "1",   # 回测时设为 0
+    # 新闻事件守卫（Odaily + BlockBeats，可选，只收紧）：按币种暂停新开仓。文件由 s03-news 定时器生成（fwresearch.blockbeats）。
+    # 未设置或文件不存在 = 未启用；文件超过 news_max_age_min 未更新 = 忽略（不卡住交易）并记日志。回测不应用。
+    "news_file": os.environ.get("S03_NEWS_FILE", ""),
+    "news_venue": "binance",                        # 交易所级事件（该交易所被盗、暂停提现等）会封禁全部交易对
+    "news_max_age_min": 30.0,
 }
 
 
@@ -203,11 +211,52 @@ class FrameworkStrategy(IStrategy):
             return 0
         return min(stake, max_stake)
 
+    _news_cache: tuple = (None, None)
+    _news_warned: str = ""
+
+    def _news_block(self, pair: str, now: datetime) -> str | None:
+        """返回封禁原因（如 "security:SOL"），没有封禁返回 None。与 fwresearch.blockbeats.load_blocks 同一口径。"""
+        f = self.fw.get("news_file")
+        runmode = getattr(getattr(getattr(self, "dp", None), "runmode", None), "value", "")
+        if not f or not os.path.exists(f) or runmode in ("backtest", "hyperopt"):
+            return None
+        mt = os.path.getmtime(f)
+        if FrameworkStrategy._news_cache[0] != mt:
+            try:
+                FrameworkStrategy._news_cache = (mt, json.load(open(f, encoding="utf-8")))
+            except (OSError, ValueError):
+                FrameworkStrategy._news_cache = (mt, None)
+        data = FrameworkStrategy._news_cache[1]
+        now_utc = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+        try:
+            gen = datetime.fromisoformat(data["generated_at"])
+        except (TypeError, KeyError, ValueError):
+            gen = None
+        if gen is None or now_utc - gen > timedelta(minutes=self.fw["news_max_age_min"]):
+            state = "error" if gen is None else "stale"
+            if FrameworkStrategy._news_warned != f"{state}:{mt}":
+                logger.warning("新闻事件守卫文件%s，已忽略：%s", "无法读取" if gen is None else "过期", f)
+                FrameworkStrategy._news_warned = f"{state}:{mt}"
+            return None
+        failed = sorted(k for k, v in (data.get("sources") or {}).items() if not v.get("ok"))
+        if failed and FrameworkStrategy._news_warned != f"degraded:{mt}":
+            logger.warning("新闻来源 %s 本轮采集失败，守卫只用剩下的来源：%s", ",".join(failed), f)
+            FrameworkStrategy._news_warned = f"degraded:{mt}"
+        coin = pair.split("/")[0].upper()
+        for b in data.get("blocks", []):
+            if b.get("target") in (coin, f"@{self.fw['news_venue']}") and datetime.fromisoformat(b["until_utc"]) > now_utc:
+                return f"{b.get('category')}:{b.get('target')}"
+        return None
+
     def confirm_trade_entry(self, pair, order_type, amount, rate, time_in_force, current_time, entry_tag, side,
                             **kwargs) -> bool:
         if self.is_template:
             return False
         if self._in_event_window(current_time) or self._event_calendar_stale():
+            return False
+        nb = self._news_block(pair, current_time)
+        if nb:
+            logger.info("新闻事件守卫：%s 暂停新开仓（%s）", pair, nb)
             return False
         row = self._signal_row(pair, current_time)
         if row is None:

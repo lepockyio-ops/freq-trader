@@ -1,4 +1,4 @@
-# freq-trader：freqtrade 自动交易框架（Binance USDⓈ-M 永续 · 模板版 v2.2 · 策略留空）
+# freq-trader：freqtrade 自动交易框架（Binance USDⓈ-M 永续 · 模板版 v2.5 · 策略留空）
 
 这是一个基于 [freqtrade](https://www.freqtrade.io/) 2026.9、**不含交易策略的框架**，交易规则由你写成一个继承 `FrameworkStrategy` 的策略接入。框架已经提供：
 
@@ -92,6 +92,7 @@ freqtrade backtesting -c $S03_FT_CONFIG --strategy SmaCrossExample --strategy-pa
 | `/etc/s03/events.env`、`/etc/s03/heartbeat.env` | BLS 要求的联系邮箱、外部心跳地址 | 你 | 空 |
 | `monitor/monitor.toml`（由 `monitor.example.toml` 复制） | 告警阈值、交易对 | 你 | 5 个交易对，示例阈值 |
 | OpenClaw 配置（合并 `deploy/openclaw/openclaw.s03.json5`） | hooks token、模型 id；装了 Vibe-Trading 时把 `mcp.servers["vibe-trading"].enabled` 改为 `true` | 你 | Vibe-Trading 关闭 |
+| `/etc/s03/blockbeats.env` | BlockBeats API Key（只放这一个）；新闻守卫（与 Odaily 同时必需）和研究 MCP 共用 | 你 | 启用新闻守卫时必填 |
 | `/etc/s03/vibe-trading.env` | 只放大模型配置，绝不放交易所密钥 | 你 | 不填也能用因子库和行情工具 |
 
 **增减交易对**：同时改 `config.json` 的 `pair_whitelist` 和 `monitor/monitor.toml` 的 `pairs`。新币可以在 `framework_base.py` 的 `maint_margin_est` 里补维持保证金率（以 Binance 杠杆档位表为准），否则用 `_default` 估计值。
@@ -159,6 +160,22 @@ VT_PYTHON=/opt/s03/vt-venv/bin/python s03ft lab factors --zoo all   # 内置 55 
 
 Vibe-Trading 只用于找想法和粗筛。它的回测按“下一根开盘调仓”成交、不模拟止损单；它的加密行情是 OKX 现货、按 UTC+8 切日。所以上线证据一律以 freqtrade 回测为准。
 
+### 新闻事件守卫：Odaily + BlockBeats（v2.5）
+
+只用来做两件事。一是**重大事件守卫**：按币种或交易所暂停新开仓，只收紧不放宽；守卫文件 30 分钟不更新就失效，不会卡住交易。二是**存档与历史回填**：作为候选因子去检验。不用新闻情绪调整仓位、杠杆或进出场。
+
+两个来源同时接入，都是必需来源：Odaily 免费，历史可回填到 2018 年；BlockBeats 付费会员，另有 ETF 资金流、稳定币、持仓量等数据。一家某轮失败时守卫状态为 `degraded`，另一家的封禁照常生效并告警。v2.5 起事件规则**只看正文、不看标题**（逐句判断）；在调规则时没看过的 7 个月数据上，封禁时间占比最高 3.6%，但命中里误报占多数。实测对比、规则说明和偏差见 `docs/RESEARCH_LAB.md` 的“新闻来源：BlockBeats 与 Odaily”。
+
+**上线前先回放**：用 `news backfill` 补历史，再用 `news replay` 看规则在过去会封多久、封的是不是真事件。规则与封禁时长都是示例值。
+
+```bash
+sudo bash deploy/install.sh --with-news           # Odaily + BlockBeats 采集与数据快照；--with-blockbeats 另装研究 MCP
+sudo editor /etc/s03/blockbeats.env               # 只填 BLOCKBEATS_API_KEY（必填）
+s03ft lab news backfill --sources odaily --since 2024-01-01   # 回填历史，再 replay 看误报
+s03ft lab news replay --source odaily --since 2024-01-01 --verbose
+s03ft status                                      # news_guard 显示 disabled / ok / stale 和当前封禁
+```
+
 ## 8. 部署到服务器、交给 OpenClaw 运营
 
 ```bash
@@ -199,6 +216,8 @@ sudo -u openclaw s03ft doctor
 | 因子显示 `insufficient` | IC 观测太少（截面 < 60、时间序列 < 12 个月）。资金费因子常见：OKX 只能下载约 3 个月资金费率 |
 | 所有因子都是 dead | 不到两年的数据、5 个高度相关的币，本来就很难有显著结论。不要为了出结果去调阈值 |
 | `lab matrix` 报“没有逐笔文件” | 先 `s03ft research run --job …`；逐笔 R 保存在 `research/results/trades/` |
+| 某个币突然不再开新仓，日志里有 `news_block` | 新闻事件守卫（Odaily / BlockBeats）命中了这个币或交易所的重大事件（时长见 `docs/RESEARCH_LAB.md`）。用 `lab news blocks` 查看原因和到期时间；不要为了恢复交易去改规则 |
+| 守卫状态是 `stale` | 采集定时器 30 分钟没有更新（Key 失效、限额或网络）。交易程序已自动忽略守卫，修好采集后自动恢复 |
 | `openclaw` 提示 Node 版本不支持 | 2026.10.8 需要 Node ≥ 24.22.1 或 ≥ 26.12.1 |
 | `openclaw doctor` 提示沙箱会过滤 MCP 工具 | 用仓库里最新的 `openclaw.s03.json5`：研究 agent 已加 `tools.sandbox.tools.alsoAllow: ["vibe-trading__*"]` |
 | `vt-check` 的 `mcp_tools.missing_from_upstream` 不为空 | Vibe-Trading 升级后改了工具名；回到 0.1.18，或同步更新 `fwresearch/mcp_guard.py` 的白名单并重跑测试 |

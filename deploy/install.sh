@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
 # S-03 freqtrade 一键部署（以 root 在你的 Linux 服务器上运行；可重复运行，不会覆盖已有的密钥与配置）。
 #
-#   sudo bash deploy/install.sh [--openclaw-user openclaw] [--with-vibe-trading] [--prefix /tmp/fakeroot]
+#   sudo bash deploy/install.sh [--openclaw-user openclaw] [--with-vibe-trading] [--with-news] [--with-blockbeats] [--prefix /tmp/fakeroot]
 #
 # 做的事：建用户与目录 → 安装 freqtrade 2026.9 与 s03ft → 生成配置与随机 token（只在文件不存在时）
 #        → 安装 systemd、sudoers、小工具 → 放置 4 个 OpenClaw agent 的工作区与技能 → enable 定时器 → 自检
 # 不做的事：不填交易所 API Key、不启动 freqtrade、不改 dry_run、不修改你的 OpenClaw 主配置。
 # --with-vibe-trading：另建 /opt/s03/vt-venv 安装 Vibe-Trading（研究前端找想法用，经 mcp-guard 白名单代理，只给 s03-research）。
+# --with-news：启用新闻采集（Odaily + BlockBeats 两家同时；存档 + 按币种的事件守卫，只收紧）和每日数据快照。需要在 /etc/s03/blockbeats.env 填 BlockBeats Key。
+# --with-blockbeats：在 --with-news 基础上，再安装官方 BlockBeats MCP（改为 HTTPS）给 s03-research。
 # --prefix 只用于测试：把所有文件装到一个假根目录，跳过建用户、chown、systemctl、visudo。
 set -euo pipefail
 
 OC_USER="openclaw"
 PREFIX=""
 WITH_VT=0
+WITH_BB=0
+WITH_NEWS=0
 VT_VERSION="0.1.18"                           # 固定版本；升级前先在研究机上跑 tests/test_fwresearch.py
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --openclaw-user) OC_USER="$2"; shift 2 ;;
     --prefix) PREFIX="${2%/}"; shift 2 ;;
     --with-vibe-trading) WITH_VT=1; shift ;;
+    --with-news) WITH_NEWS=1; shift ;;
+    --with-blockbeats) WITH_BB=1; WITH_NEWS=1; shift ;;
     *) echo "未知参数：$1"; exit 2 ;;
   esac
 done
@@ -57,6 +63,10 @@ if ! fake; then
     [[ -x /opt/s03/vt-venv/bin/python ]] || python3 -m venv /opt/s03/vt-venv
     /opt/s03/vt-venv/bin/pip install -q --upgrade pip
     /opt/s03/vt-venv/bin/pip install -q "vibe-trading-ai==$VT_VERSION"
+  fi
+  if [[ $WITH_BB == 1 ]]; then
+    command -v npm >/dev/null || { echo "需要 npm（OpenClaw 依赖 Node，通常已安装）"; exit 1; }
+    bash "$SRC/deploy/bin/s03-install-blockbeats-mcp" /opt/s03/bb-mcp
   fi
   chown -R root:root /opt/s03 && chmod -R go-w /opt/s03
 fi
@@ -106,8 +116,9 @@ fi
 if newfile "$E/events.env"; then install -m 0644 "$SRC/deploy/env/events.env.example" "$E/events.env"; fi
 if newfile "$E/heartbeat.env"; then install -m 0600 "$SRC/deploy/env/heartbeat.env.example" "$E/heartbeat.env"; fi
 if newfile "$E/vibe-trading.env"; then install -m 0640 "$SRC/deploy/env/vibe-trading.env.example" "$E/vibe-trading.env"; fi
+if newfile "$E/blockbeats.env"; then install -m 0640 "$SRC/deploy/env/blockbeats.env.example" "$E/blockbeats.env"; fi
 chmod 0600 "$E"/*.env 2>/dev/null || true; chmod 0644 "$E/events.env"
-chmod 0640 "$E/vibe-trading.env"; own "root:$OC_USER" "$E/vibe-trading.env"     # Gateway（openclaw 用户）启动 MCP 时要读
+chmod 0640 "$E/vibe-trading.env" "$E/blockbeats.env"; own "root:$OC_USER" "$E/vibe-trading.env" "$E/blockbeats.env"   # Gateway（openclaw 用户）启动 MCP 时要读；s03-news 由 systemd 以 root 读入
 
 say "4/8 工作目录（复盘收件箱、研究副本）"
 install -d -m 0750 "$R/srv/s03-review" "$R/srv/s03-research" "$R/srv/s03-research/vt-runs" "$R/srv/s03-research/research/lab"
@@ -122,7 +133,7 @@ fake || chown -R "$OC_USER:$OC_USER" /srv/s03-research
 
 say "5/8 小工具、systemd 服务、sudoers"
 install -D -m 0755 "$SRC/deploy/bin/s03-gate"       "$R/usr/local/bin/s03-gate"
-for b in s03-hook s03-ft-export s03-heartbeat s03-vt-mcp; do install -D -m 0755 "$SRC/deploy/bin/$b" "$R/usr/local/lib/s03/$b"; done
+for b in s03-hook s03-ft-export s03-heartbeat s03-vt-mcp s03-bb-mcp s03-install-blockbeats-mcp; do install -D -m 0755 "$SRC/deploy/bin/$b" "$R/usr/local/lib/s03/$b"; done
 install -d "$R/etc/systemd/system" && install -m 0644 "$SRC"/deploy/systemd/* "$R/etc/systemd/system/"
 install -d "$R/etc/sudoers.d"
 if fake; then
@@ -152,6 +163,10 @@ if ! fake; then
   systemctl enable s03-freqtrade.service s03-ft-monitor.service s03-ft-gate.service \
     s03-events.timer s03-heartbeat.timer s03-wake-daily.timer s03-wake-weekly.timer
   systemctl start s03-events.service || echo "事件日历首次生成失败：请先在 /etc/s03/events.env 填联系邮箱，再 systemctl start s03-events"
+  if [[ $WITH_NEWS == 1 ]]; then
+    systemctl enable s03-news.timer s03-news-data.timer
+    echo "新闻守卫：填好 /etc/s03/blockbeats.env 后运行 systemctl start s03-news.timer s03-news-data.timer；s03ft status 的 news_guard 应为 ok"
+  fi
 fi
 
 say "8/8 自检"
@@ -172,4 +187,10 @@ cat <<EOF
   4. dry_run 默认为 true；改为 false 属于 G9，只能由你在 /etc/s03/ft-config.json 中修改并重启。
   5. （可选）研究前端找想法：用 --with-vibe-trading 重跑本脚本，在 /etc/s03/vibe-trading.env 填大模型配置，
      再把 OpenClaw 配置里 mcp.servers["vibe-trading"].enabled 改为 true。说明见 docs/RESEARCH_LAB.md。
+  6. （可选）新闻事件守卫（Odaily + BlockBeats 两家同时）：用 --with-news 重跑本脚本（--with-blockbeats 另装研究 MCP），
+     在 /etc/s03/blockbeats.env 填 BlockBeats Key 后自检：
+     sudo bash -c 'set -a; . /etc/s03/blockbeats.env; cd /opt/s03/ft-s03; /opt/s03/venv/bin/python -m fwresearch news check'
+     两个来源都 ok: true 后 systemctl start s03-news.timer s03-news-data.timer；s03ft status 的 news_guard 应为 ok
+     （degraded 表示有一家这一轮失败，封禁照常但要查原因）。
+     研究 agent 的 MCP：把 OpenClaw 配置里 mcp.servers["blockbeats"].enabled 改为 true。说明见 docs/RESEARCH_LAB.md。
 EOF

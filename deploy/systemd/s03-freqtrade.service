@@ -18,6 +18,8 @@ StateDirectory=s03-ft
 Environment=PYTHONUNBUFFERED=1
 # 使用哪个策略由 /etc/s03/ft-config.json 的 "strategy" 决定（默认空白模板 MyStrategy）
 Environment=S03_EVENTS_FILE=/var/lib/s03-events/events.json
+# 新闻事件守卫：文件不存在（未启用 s03-news）时等于关闭；超过 30 分钟未更新时忽略
+Environment=S03_NEWS_FILE=/var/lib/s03-news/news_blocks.json
 # 交易所 API Key 与 freqtrade API 账号用 FREQTRADE__ 环境变量注入：root 所有、0600，OpenClaw 用户读不到
 EnvironmentFile=/etc/s03/ft-trader.env
 ExecStartPre=/opt/s03/venv/bin/freqtrade create-userdir --userdir /var/lib/s03-ft/user_data
