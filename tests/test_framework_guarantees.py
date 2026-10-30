@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -280,38 +281,106 @@ def test_take_profit_gives_up_after_max_attempts():
     assert adjust(s, t, 102.5) is None and t.cd["tp_skipped"] == ["tp_2R"]
 
 
-def _open(stop_px=None, enter_tag=None, entries=1, amount=10.0, pair="ETH/USDT:USDT", invalid=None):
-    t = FakeTrade(enter_tag, 100.0, amount, pair=pair, entries=entries)
+_TID = iter(range(1000, 100000))
+
+
+def real_trade(state, qty=10.0, enter_tag=None, stop_px=None, pair="ETH/USDT:USDT", invalid=None, price=100.0):
+    """用 freqtrade 自己的 LocalTrade / Order 构造交易（v2.6 的测试用了自写假对象，漏掉了挂单 amount = 0 的真实形态）。
+    state：pending（挂单未成交）/ partial（部分成交、单子仍挂着）/ filled（入场已完成）。"""
+    from freqtrade.persistence import LocalTrade, Order
+    from freqtrade.persistence.custom_data import CustomDataWrapper
+
+    CustomDataWrapper.use_db = False
+    filled = {"pending": 0.0, "partial": qty * 0.4, "filled": qty}[state]
+    t = LocalTrade(id=next(_TID), pair=pair, stake_amount=qty * price / 10, amount=qty if state == "filled" else 0.0,
+                   amount_requested=qty, open_rate=price, open_rate_requested=price, fee_open=0.0005, fee_close=0.0005,
+                   open_date=NOW, is_open=True, enter_tag=enter_tag, exchange="binance", leverage=10, trading_mode="futures")
+    t.orders.append(Order(ft_order_side="buy", ft_pair=pair, ft_is_open=state != "filled", ft_amount=qty, ft_price=price,
+                          order_id=f"o{t.id}", status="closed" if state == "filled" else "open", symbol=pair,
+                          order_type="limit", side="buy", price=price, average=price, amount=qty, filled=filled,
+                          remaining=qty - filled, cost=filled * price, order_date=NOW))
     if stop_px is not None:
-        t.cd["stop_px"] = stop_px
+        t.set_custom_data("stop_px", stop_px)
     if invalid:
-        t.cd["fw_invalid"] = invalid
+        t.set_custom_data("fw_invalid", invalid)
     return t
 
 
-@pytest.mark.parametrize("trade,expect", [
-    (lambda: _open(stop_px=99.0), True),                                     # 正常持仓，风险 10
-    (lambda: _open(enter_tag=tag(99.0), entries=0), True),                  # 挂单：按计划止损算
-    (lambda: _open(enter_tag=tag(95.0), entries=0, amount=40.0), False),    # 挂单风险 200 → 总风险超 1.5%
-    (lambda: _open(enter_tag="manual", entries=1), False),                  # 已成交但没有止损 / 计划
-    (lambda: _open(enter_tag=None, entries=0), False),                      # 挂单没有计划
-    (lambda: _open(enter_tag=tag(99.0), invalid="stop_not_below_fill"), False),
+def test_real_freqtrade_shapes():
+    p, q, f = real_trade("pending"), real_trade("partial"), real_trade("filled")
+    assert p.amount == 0 and q.amount == 0 and f.amount == 10
+    assert p.nr_of_successful_entries == 0 and q.nr_of_successful_entries == 0 and f.nr_of_successful_entries == 1
+    assert not q.has_open_position and q.has_open_orders                      # 部分成交时交易所上没有止损
+
+
+@pytest.mark.parametrize("trade,risk", [
+    (lambda: real_trade("filled", enter_tag=tag(99.0), stop_px=99.0), 10.0),
+    (lambda: real_trade("pending", enter_tag=tag(99.0)), 10.0),               # v2.6 按 0 计算
+    (lambda: real_trade("partial", enter_tag=tag(99.0)), 10.0),               # 已成交 + 剩余，按下单数量算一次
+    (lambda: real_trade("pending", enter_tag=tag(95.0), qty=40.0), 200.0),
 ])
-def test_open_risk_counts_pending_and_rejects_missing_info(trade, expect):
+def test_open_risk_uses_requested_amount_for_orders_in_flight(trade, risk):
+    s = strat()
+    assert abs(s._open_risk([trade()]) - risk) < 1e-9
+
+
+@pytest.mark.parametrize("trade", [
+    lambda: real_trade("filled", enter_tag="manual"),                         # 已成交但没有止损 / 计划
+    lambda: real_trade("pending", enter_tag=None),                            # 挂单没有计划
+    lambda: real_trade("pending", enter_tag=tag(99.0), invalid="stop_not_below_fill"),
+])
+def test_open_risk_unknown_blocks_new_entries(trade):
+    s = strat(open_trades=[trade()])
+    assert s._open_risk([trade()]) is None
+    assert s.confirm_trade_entry("BTC/USDT:USDT", "limit", 1, 100.0, "GTC", NOW, tag(99.0), "long") is False
+
+
+def test_three_pending_orders_cannot_exceed_open_risk():
+    """审查 v2.6 的反例：单笔预算 1%、组合上限 1.5%，三笔正常定仓的挂单，第三笔不能再获准（参数只用于构造反例）。"""
+    params = {"risk_per_trade": 0.01, "max_open_risk": 0.015}
+    s = strat(params)
+    amount, _ = sized_amount(s, 100.0, 99.0)
+    first = real_trade("pending", qty=amount, enter_tag=tag(99.0), pair="ETH/USDT:USDT")
     d1 = pd.DataFrame({"date": pd.date_range("2026-09-01", periods=40, freq="D", tz="UTC"),
                        "close": [100 + (i % 3) for i in range(40)]})
-    d2 = d1.assign(close=[100 + (i % 5) * (-1) ** i for i in range(40)])
-    s = strat(open_trades=[trade()])
-    s.dp = SimpleNamespace(get_pair_dataframe=lambda p, tf: d1 if p.startswith("BTC") else d2,
-                           current_whitelist=lambda: ["BTC/USDT:USDT", "ETH/USDT:USDT"],
+    s = strat(params, open_trades=[first])
+    rng = {p: np.random.default_rng(i) for i, p in enumerate(["BTC/USDT:USDT", "ETH/USDT:USDT"])}
+    data = {p: d1.assign(close=100 * np.exp(np.cumsum(r.normal(0, 0.02, 40)))) for p, r in rng.items()}
+    s.dp = SimpleNamespace(get_pair_dataframe=lambda p, tf: data[p], current_whitelist=lambda: [],
                            runmode=SimpleNamespace(value="dry_run"))
-    amount, _ = sized_amount(s, 100.0, 99.0)
-    assert s.confirm_trade_entry("BTC/USDT:USDT", "limit", amount, 100.0, "GTC", NOW, tag(99.0), "long") is expect
+    assert s._corr_ok("BTC/USDT:USDT", [first])                             # 相关性不是拒绝原因
+    assert abs(s._open_risk([first]) - amount * 1.0) < 1e-9
+    half = real_trade("pending", qty=amount / 4, enter_tag=tag(99.0), pair="ETH/USDT:USDT")
+    s2 = strat(params, open_trades=[half])
+    s2.dp = s.dp
+    assert s2.confirm_trade_entry("BTC/USDT:USDT", "limit", amount, 100.0, "GTC", NOW, tag(99.0), "long") is True
+    second = real_trade("pending", qty=amount, enter_tag=tag(99.0), pair="SOL/USDT:USDT")
+    s3 = strat(params, open_trades=[first, second])
+    data["SOL/USDT:USDT"] = d1.assign(close=100 * np.exp(np.cumsum(np.random.default_rng(9).normal(0, 0.02, 40))))
+    s3.dp = s.dp
+    assert s3._open_risk([first, second]) + amount * 1.0 > EQUITY * 0.015    # 两笔挂单 147 + 第三笔 73.5 > 150
+    assert s3._corr_ok("BTC/USDT:USDT", [first, second])
+    assert s3.confirm_trade_entry("BTC/USDT:USDT", "limit", amount, 100.0, "GTC", NOW, tag(99.0), "long") is False
+
+
+def test_partial_fill_cancels_the_rest_so_the_stop_can_be_placed():
+    """审查 v2.6 P0：部分成交、单子仍挂着时 freqtrade 不更新 amount，交易所上没有止损。框架撤掉剩余部分。"""
+    s = strat()
+    q, p = real_trade("partial", enter_tag=tag(99.0)), real_trade("pending", enter_tag=tag(99.0))
+    assert s.check_entry_timeout(q.pair, q, q.orders[0], NOW) is True
+    assert s.check_entry_timeout(p.pair, p, p.orders[0], NOW) is False      # 还没成交：照常等待
+    assert s._bind_stop(q) is None                                           # 撤单完成前不绑定（没有仓位）
+    # freqtrade 撤单后：订单关闭、按已成交数量更新仓位 → 下一轮绑定止损
+    o = q.orders[0]
+    o.ft_is_open, o.status, q.amount = False, "canceled", o.filled
+    assert q.nr_of_successful_entries == 1 and q.has_open_position
+    sp = s._bind_stop(q)
+    assert sp is not None and abs(q.amount * (100.0 - sp)) <= EQUITY * 0.005 * 1.05
 
 
 def test_correlation_check_rejects_when_daily_data_is_missing():
     """审查 P1：日线缺失时旧实现直接跳过相关性检查。现在拒绝，并在 informative_pairs 里固定订阅日线。"""
-    s = strat(open_trades=[_open(stop_px=99.0)])
+    s = strat(open_trades=[real_trade("filled", enter_tag=tag(99.0), stop_px=99.0)])
     s.dp = SimpleNamespace(get_pair_dataframe=lambda p, tf: pd.DataFrame(), current_whitelist=lambda: ["BTC/USDT:USDT"],
                            runmode=SimpleNamespace(value="dry_run"))
     assert s.confirm_trade_entry("BTC/USDT:USDT", "limit", 1, 100.0, "GTC", NOW, tag(99.0), "long") is False
@@ -326,3 +395,19 @@ def test_take_profit_tolerates_contract_rounding():
     s, t = tp_trade()
     t.amount = 10.0 * (1 - 0.4987)                       # 交易所把 0.01855 取整成 0.0185：只差一点也算完成
     assert adjust(s, t, 102.5) is None and t.cd["tp_done"] == ["tp_2R"]
+
+
+@pytest.mark.parametrize("policy,expect", [("widen", "widen"), ("exit", "exit"), ("keep", "keep")])
+def test_better_fill_policy(policy, expect):
+    """成交价比下单价更优、止损距离不足下限时的处理（v2.7 改为参数，由你决定）。"""
+    s = strat({"better_fill_policy": policy})
+    amount, lev = sized_amount(s, 100.0, 99.0)
+    t = real_trade("filled", qty=amount, enter_tag=tag(99.0), pair="BTC/USDT:USDT", price=99.5)
+    sp = s._bind_stop(t)
+    if expect == "widen":
+        assert sp is not None and (99.5 - sp) / 99.5 * 100 >= 0.8 and t.get_custom_data("stop_widened")
+    elif expect == "exit":
+        assert sp is None and t.get_custom_data("fw_invalid") == "stop_too_close_after_fill"
+        assert s.custom_exit(t.pair, t, NOW, 99.5, 0.0) == "fw_invalid_stop:stop_too_close_after_fill"
+    else:
+        assert sp == 99.0 and t.get_custom_data("stop_kept_below_min")

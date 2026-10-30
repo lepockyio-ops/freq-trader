@@ -56,7 +56,7 @@
         },
         {
           "pattern": "s03ft",
-          "argPattern": "^research (plan|run|verify|aggregate|portfolio|g0)( [A-Za-z0-9_.=:/,-]+)*$"
+          "argPattern": "^research (plan|run|verify|aggregate|portfolio|verdict|fingerprint|g0)( [A-Za-z0-9_.=:/,-]+)*$"
         },
         {
           "pattern": "s03ft",
@@ -64,7 +64,7 @@
         },
         {
           "pattern": "s03ft",
-          "argPattern": "^lab idea (add|list|show|move|attach|trials)(?!.*--by human)(?!.*--approver)( [^\\n]{1,2000})?$"
+          "argPattern": "^lab idea (add|list|show|move|attach|trials|holdout)(?!.*--by human)(?!.*--approver)( [^\\n]{1,2000})?$"
         },
         {
           "pattern": "s03ft",

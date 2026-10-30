@@ -58,3 +58,39 @@ def test_status_reports_news_guard_and_lab_news(tmp_path):
     from s03ft import cli
 
     assert cli.news_info(tmp_path / "none.json")["status"] == "disabled"
+
+
+# ------------------------------------------------------------------ v2.7：必需压力方案随策略声明
+def test_required_stress_follows_the_strategy(tmp_path, monkeypatch):
+    sdir = tmp_path / "strats"
+    sdir.mkdir()
+    (sdir / "MarketEntry.py").write_text(
+        "from framework_base import FrameworkStrategy\n"
+        "class MarketEntry(FrameworkStrategy):\n"
+        "    timeframe = '15m'\n"
+        "    research_stress = ('cost2x', 'stopslip')     # 市价入场：不需要 delay1\n"
+        "    research_stop_slip = 0.003\n", "utf-8")
+    (sdir / "Bad.py").write_text(
+        "from framework_base import FrameworkStrategy\n"
+        "class Bad(FrameworkStrategy):\n"
+        "    research_stress = ('cost2x', 'moon')\n", "utf-8")
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setenv("FW_STRATEGY_PATH", str(sdir))
+    monkeypatch.setenv("FW_STRATEGY", "MarketEntry")
+    req = matrix.strategy_requirements()
+    assert req["required_stress"] == ["cost2x", "stopslip"] and req["stop_slip"] == 0.003
+    monkeypatch.setenv("FW_STRATEGY", "Bad")
+    with pytest.raises(SystemExit, match="moon"):
+        matrix.strategy_requirements()
+    monkeypatch.setenv("FW_STRATEGY_PATH", str(ROOT / "examples" / "strategies"))
+    monkeypatch.setenv("FW_STRATEGY", "SmaCrossExample")
+    assert matrix.strategy_requirements()["required_stress"] == ["cost2x", "delay1", "stopslip"]   # 框架默认
+
+
+def test_portfolio_failure_replaces_latest(tmp_path, monkeypatch):
+    """审查 v2.6 P1-4：失败的运行也要成为 latest（状态 error），旧的成功结果不能再被读到。"""
+    monkeypatch.setattr(matrix, "PORTFOLIO", tmp_path / "portfolio")
+    monkeypatch.setattr(matrix, "run_freqtrade", lambda v, tr, p, o: ({"status": "error", "stderr_tail": "boom"}, None))
+    res = matrix.portfolio("base", "20240101-", {"id": "fp"})
+    latest = json.loads((tmp_path / "portfolio" / "base" / "latest.json").read_text("utf-8"))
+    assert res["status"] == "error" and latest["status"] == "error" and "csv" not in latest

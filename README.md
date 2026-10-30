@@ -1,4 +1,4 @@
-# freq-trader：freqtrade 自动交易框架（Binance USDⓈ-M 永续 · 模板版 v2.6 · 策略留空）
+# freq-trader：freqtrade 自动交易框架（Binance USDⓈ-M 永续 · 模板版 v2.7 · 策略留空）
 
 这是一个基于 [freqtrade](https://www.freqtrade.io/) 2026.9、**不含交易策略的框架**，交易规则由你写成一个继承 `FrameworkStrategy` 的策略接入。框架已经提供：
 
@@ -118,8 +118,9 @@ freqtrade backtesting -c $S03_FT_CONFIG --strategy SmaCrossExample --strategy-pa
 ```
 
 ```bash
-# ① 登记想法：假设、机制、证伪条件三项必填
+# ① 登记想法：假设、机制、证伪条件三项必填；回测之前登记样本外起点（只能登记一次）
 s03ft lab idea add --title "…" --hypothesis "…" --mechanism "…" --falsification "…" --source human
+s03ft lab idea holdout --id I-… --start 2025-06-01
 
 # ② 筛因子（5 个币，跨币种比较；只有 alive / reversed 且 FDR 显著才算候选）
 s03ft lab factors --tf 1d --horizon 3
@@ -127,14 +128,14 @@ s03ft lab factors --tf 1d --horizon 3
 # ③ 写成策略后：偏差检查 + 组合回测（主证据）+ 研究矩阵（诊断；逐笔 R 另存 research/results/trades/）
 s03ft research g0 --timerange 20250101-
 s03ft events build --out research/events_history.json --history   # 回测用的历史事件
-s03ft research portfolio --variant base --timerange 20220101-     # 五币同时、连续时间、共享余额
+s03ft research portfolio --all --timerange 20220101-     # 五币同时、连续时间、共享余额；base + 策略声明的压力方案
 s03ft research plan --pairs BTC,ETH,SOL,BNB,HYPE --years 2023-2025 --variants base,stop_floor,cost2x,delay1
 s03ft research run --job BTC-2024-base             # 对 research/jobs.json 里每一格执行
 s03ft research aggregate                           # 只汇总清单里、当前版本、成功的任务
 
-# ④ 统计检验：Bootstrap、按周 Bootstrap、分段一致性、Deflated Sharpe、PBO、样本外段、压力方案
-s03ft lab stats --trades research/results/portfolio/base.csv --holdout-start 2025-01-01
-s03ft lab matrix --holdout-start 2025-01-01
+# ④ 上线判定（唯一入口）：组合回测 + 策略声明的全部压力方案 + 登记的样本外段；矩阵只出诊断
+s03ft research verdict --idea I-…
+s03ft lab matrix --idea I-…                        # 诊断：PBO、各方案对比
 
 # ⑤ 批准（只能由你在终端执行；s03ft 会拒绝 --by human）
 python -m fwresearch idea move --id I-… --to approved --reason "已审阅报告" --by human --approver <你的名字>

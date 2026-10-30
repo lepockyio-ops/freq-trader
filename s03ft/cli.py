@@ -384,7 +384,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--history", action="store_true")
     p.set_defaults(fn=cmd_events)
     p = sub.add_parser("research")
-    p.add_argument("sub", choices=["plan", "run", "verify", "aggregate", "portfolio", "g0"])
+    p.add_argument("sub", choices=["plan", "run", "verify", "aggregate", "portfolio", "verdict", "fingerprint", "g0"])
     p.add_argument("args", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_research)
     p = sub.add_parser("lab")

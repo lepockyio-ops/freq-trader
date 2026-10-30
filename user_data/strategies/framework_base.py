@@ -67,6 +67,11 @@ FW_DEFAULTS = {
     "news_max_age_min": 30.0,
     # 研究用压力方案 delay1：入场信号推迟 N 根 K 线（只在回测 / hyperopt 里生效，实盘与 dry-run 忽略）
     "research_entry_delay_bars": int(os.environ.get("S03_ENTRY_DELAY_BARS", "0") or 0),
+    # 成交价比下单价更优、按成交价算的止损距离低于下限时怎么办（v2.7，由你决定；研究方案 fill_exit / fill_keep 可对比）：
+    #   widen：止损放宽到下限 + 0.02 个百分点（风险仍在预算内，但止损不在原结构位）——v2.6 的行为，默认
+    #   exit ：立即离场（最贴近“结构太近就不做”，代价是一笔往返成本）
+    #   keep ：保留原结构止损（违反距离下限）
+    "better_fill_policy": os.environ.get("S03_BETTER_FILL_POLICY") or "widen",
 }
 
 
@@ -148,6 +153,11 @@ class FrameworkStrategy(IStrategy):
     use_exit_signal = True                     # 允许策略用 populate_exit_trend 离场
 
     is_template = False                        # 空白模板设为 True（框架自检会提示“未配置策略”）
+    # 研究：上线判定必须通过的压力方案（随策略而定，v2.7）。可选：cost2x（手续费与滑点加重）、delay1（入场推迟一根 K 线）、
+    # stopslip（止损离场再扣额外滑点，事后近似）。例如只用市价入场的策略可以去掉 delay1；止损很窄的策略应保留 stopslip。
+    # 改动要写进策略规格（docs/STRATEGY_TEMPLATE.md），并在 research plan / portfolio 之前定好。
+    research_stress: tuple = ("cost2x", "delay1", "stopslip")
+    research_stop_slip: float = 0.002          # stopslip 方案每次止损额外扣的滑点（名义价值的比例，示例值）
     framework_params: dict = {}                # 子类覆盖框架参数，例如 {"risk_per_trade": 0.003}
 
     @property
@@ -387,23 +397,58 @@ class FrameworkStrategy(IStrategy):
             return False
         return True
 
+    @staticmethod
+    def _entry_in_flight(t) -> bool:
+        """入场单还没走完：没有任何已完成的入场成交，或者还有挂着的入场单（含已部分成交）。"""
+        if not getattr(t, "nr_of_successful_entries", 0):
+            return True
+        side = getattr(t, "entry_side", "buy")
+        return any(getattr(o, "ft_order_side", None) == side and getattr(o, "ft_is_open", False)
+                   for o in (getattr(t, "orders", None) or []))
+
     def _open_risk(self, open_trades) -> float | None:
-        """已占用的止损风险：已成交按绑定的止损 × 当前数量；还没成交的挂单按计划止损 × 下单数量。
+        """已占用的止损风险（v2.7 修正）：
+        - 入场已走完：绑定的止损 × 当前持仓数量 trade.amount；
+        - 入场还在进行（未成交或部分成交、单子仍挂着）：止损（已绑定的，否则用计划止损）× 下单数量 amount_requested，
+          价格用下单价 open_rate_requested。freqtrade 新建交易时 amount = 0，挂单期间不会更新它；
+          v2.6 乘的是 trade.amount，挂单风险实际按 0 计算（外部审查 v2.6 P1-1）。
         任何一笔既没有绑定止损、也读不出计划（或已判为无效、正在离场）时返回 None：信息缺失时不再新增风险。"""
         total = 0.0
         for t in open_trades:
+            in_flight = self._entry_in_flight(t)
             sp = t.get_custom_data("stop_px")
-            if sp is None and getattr(t, "nr_of_successful_entries", 1):
+            if sp is None and not in_flight:
                 sp = self._bind_stop(t)                     # 已成交但还没绑定（例如刚重启）：现在绑定
                 if sp is None:
                     return None
-            if sp is None:                                  # 还没成交的挂单：按计划止损
+            if sp is None:                                  # 入场还在进行：按计划止损
                 plan = decode_plan(getattr(t, "enter_tag", None))
-                if plan is None:
+                if plan is None or t.get_custom_data("fw_invalid"):
                     return None
                 sp = plan["stop"]
-            total += max(0.0, (float(t.open_rate) - float(sp)) * float(t.amount))
+            if in_flight:
+                qty = max(float(getattr(t, "amount_requested", 0) or 0), float(t.amount or 0))
+                px = float(getattr(t, "open_rate_requested", None) or t.open_rate)
+            else:
+                qty, px = float(t.amount), float(t.open_rate)
+            if qty <= 0:
+                return None                                 # 读不出数量：不能证明风险为 0
+            total += max(0.0, (px - float(sp)) * qty)
         return total
+
+    def check_entry_timeout(self, pair, trade, order, current_time, **kwargs) -> bool:
+        """入场单一旦部分成交，就撤掉剩余部分（v2.7，外部审查 v2.6 P0）。
+        freqtrade 在入场单仍挂着时不更新 trade.amount，has_open_position = False，交易所上不会挂任何止损，
+        直到整单成交或超时撤单。撤掉剩余后，已成交部分成为正式仓位，下一轮循环（约 5 秒）绑定止损并挂到交易所。
+        freqtrade 每轮都对挂着的入场单调用本回调；返回 True = 按超时撤单（已成交部分保留）。"""
+        try:
+            filled = float(getattr(order, "filled", 0) or 0)
+            if filled > 0 and getattr(order, "status", "open") == "open":
+                logger.warning("%s 入场单部分成交 %s：撤掉剩余部分，已成交部分立即挂止损", pair, filled)
+                return True
+        except Exception:
+            logger.exception("检查入场单状态出错：%s", pair)
+        return False
 
     def informative_pairs(self):
         """相关性检查需要白名单全部交易对的日线：在这里固定订阅（实盘 dp 只返回订阅过的数据）。
@@ -441,7 +486,7 @@ class FrameworkStrategy(IStrategy):
         if sp is not None:
             return float(sp)
         if trade.get_custom_data("fw_invalid") or not getattr(trade, "nr_of_successful_entries", 1) or not trade.amount:
-            return None
+            return None                                     # 还没有已完成的入场成交：交易所上也还没有仓位
         fw, fill = self.fw, float(trade.open_rate)
         plan, reason, stop = decode_plan(trade.enter_tag), "", None
         if plan is None:
@@ -455,10 +500,16 @@ class FrameworkStrategy(IStrategy):
                 reason = "stop_too_far"
             else:
                 if dist < fw["stop_min_pct"] + 0.02:          # 多留 0.02 个百分点：按价格最小变动单位取整后仍不低于下限
-                    stop = fill * (1 - (fw["stop_min_pct"] + 0.02) / 100)
-                    trade.set_custom_data("stop_widened", True)
+                    policy = fw.get("better_fill_policy", "widen")
+                    if policy == "exit":
+                        reason = "stop_too_close_after_fill"
+                    elif policy == "keep":
+                        trade.set_custom_data("stop_kept_below_min", True)
+                    else:
+                        stop = fill * (1 - (fw["stop_min_pct"] + 0.02) / 100)
+                        trade.set_custom_data("stop_widened", True)
                 equity = self.wallets.get_total_stake_amount() if getattr(self, "wallets", None) else None
-                if equity and trade.amount * (fill - stop) > equity * fw["risk_per_trade"] * 1.05:
+                if not reason and equity and trade.amount * (fill - stop) > equity * fw["risk_per_trade"] * 1.05:
                     reason = "risk_over_budget"
         if reason:
             trade.set_custom_data("fw_invalid", reason)

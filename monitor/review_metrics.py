@@ -33,7 +33,12 @@ def compute(trades: list[dict]) -> dict:
     for t in ordered:
         by[t["coin"]].append(t)
     # 合计按全账户的平仓顺序计算（v2.5 及以前先按币分组再拼接，打乱了顺序，最长连亏会算少）
+    by_tag = defaultdict(list)
+    for t in ordered:
+        if "tag" in t:
+            by_tag[t["tag"]].append(t)
     return {"total": stats(ordered), "by_coin": {c: stats(v) for c, v in sorted(by.items())},
+            "by_tag": {k: stats(v) for k, v in sorted(by_tag.items())},
             "evidence": "已核验事实（由日志或交易记录逐笔计算）；n < 30 时任何结论都属证据不足"}
 
 
@@ -44,6 +49,9 @@ def to_markdown(m: dict, title: str) -> str:
     for name, s in rows:
         lines.append(f"| {name} | {s['n']} | {s['win_rate']} | {s['expectancy_r']} | {s['pnl']} | {s['profit_factor']} | "
                      f"{s['max_consecutive_losses']} | {s['exit_reasons']} |")
+    if m.get("by_tag"):
+        lines += ["", "| 策略标记 | 笔数 | 胜率 | 期望值（R） | 盈亏 |", "| --- | --- | --- | --- | --- |"]
+        lines += [f"| {k} | {v['n']} | {v['win_rate']} | {v['expectancy_r']} | {v['pnl']} |" for k, v in m["by_tag"].items()]
     lines += ["", m["evidence"]]
     return "\n".join(lines)
 
@@ -77,5 +85,14 @@ def from_freqtrade(trades: list[dict]) -> list[dict]:
         pnl = float(t.get("profit_abs") or 0)
         out.append({"coin": str(t.get("pair", "")).split("/")[0], "pnl": pnl,
                     "r": round(pnl / risk, 3) if risk > 0 else None, "exit_reason": t.get("exit_reason"),
-                    "close_time": t.get("close_date")})
+                    "close_time": t.get("close_date"), "tag": strategy_tag(t.get("enter_tag"))})
     return out
+
+
+def strategy_tag(enter_tag) -> str:
+    """框架把入场计划写进 enter_tag（fw|s=…|c=…|t=…|u=<策略自己的标记>），每笔都不同，freqtrade 自带的按标记分组因此失效。
+    这里取回策略自己的标记（u= 之后）；没有时记为 "(无)"。"""
+    s = str(enter_tag or "")
+    if not s.startswith("fw|"):
+        return s or "(无)"
+    return s.split("|u=", 1)[1] if "|u=" in s else "(无)"

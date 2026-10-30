@@ -22,3 +22,14 @@ def test_total_streak_uses_account_close_order():
            {"coin": "ETH", "close_time": "2026-01-04", "r": 1, "pnl": 1, "exit_reason": "tp"}]
     m = compute(trs)
     assert m["total"]["max_consecutive_losses"] == 2 and m["by_coin"]["BTC"]["max_consecutive_losses"] == 1
+
+
+def test_strategy_tag_recovered_from_framework_enter_tag():
+    from review_metrics import strategy_tag
+
+    assert strategy_tag("fw|s=99|c=|t=1|u=breakout") == "breakout"
+    assert strategy_tag("fw|s=99|c=|t=1") == "(无)" and strategy_tag("manual") == "manual"
+    trs = from_freqtrade([{"is_open": False, "pair": "BTC/USDT:USDT", "profit_abs": 10, "open_rate": 100, "stop_loss_abs": 99,
+                           "amount": 10, "orders": [], "close_date": "2026-01-01", "exit_reason": "roi",
+                           "enter_tag": "fw|s=99|c=|t=1|u=breakout"}])
+    assert compute(trs)["by_tag"]["breakout"]["n"] == 1
