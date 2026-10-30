@@ -23,3 +23,6 @@ user_data/config-private.json
 # 研究前端输出（程序生成，可随时重跑）；想法登记簿 research/ideas.jsonl 建议保留并提交
 research/lab/
 research/results/trades/
+
+# 研究脚本的数据校验和缓存（程序生成）
+research/.data_sha256_cache.json

@@ -1,4 +1,4 @@
-# freq-trader：freqtrade 自动交易框架（Binance USDⓈ-M 永续 · 模板版 v2.7 · 策略留空）
+# freq-trader：freqtrade 自动交易框架（Binance USDⓈ-M 永续 · 模板版 v2.12 · 策略留空）
 
 这是一个基于 [freqtrade](https://www.freqtrade.io/) 2026.9、**不含交易策略的框架**，交易规则由你写成一个继承 `FrameworkStrategy` 的策略接入。框架已经提供：
 
@@ -128,12 +128,12 @@ s03ft lab factors --tf 1d --horizon 3
 # ③ 写成策略后：偏差检查 + 组合回测（主证据）+ 研究矩阵（诊断；逐笔 R 另存 research/results/trades/）
 s03ft research g0 --timerange 20250101-
 s03ft events build --out research/events_history.json --history   # 回测用的历史事件
-s03ft research portfolio --all --timerange 20220101-     # 五币同时、连续时间、共享余额；base + 策略声明的压力方案
-s03ft research plan --pairs BTC,ETH,SOL,BNB,HYPE --years 2023-2025 --variants base,stop_floor,cost2x,delay1
+s03ft research portfolio --all --idea I-… --trials base,stop_floor,fill_exit --timerange 20220101-   # 共享余额；base + 压力方案 + 候选方案（PBO 用）
+s03ft research plan --idea I-… --pairs BTC,ETH,SOL,BNB,HYPE --years 2023-2025 --variants base,stop_floor,fill_exit,cost2x,delay1   # 诊断：按币、按年拆解
 s03ft research run --job BTC-2024-base             # 对 research/jobs.json 里每一格执行
 s03ft research aggregate                           # 只汇总清单里、当前版本、成功的任务
 
-# ④ 上线判定（唯一入口）：组合回测 + 策略声明的全部压力方案 + 登记的样本外段；矩阵只出诊断
+# ④ 上线判定（唯一入口）：组合回测 + 策略声明的全部压力方案 + 登记的样本外段 + PBO（组合回测候选，只用开发区间）
 s03ft research verdict --idea I-…
 s03ft lab matrix --idea I-…                        # 诊断：PBO、各方案对比
 

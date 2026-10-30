@@ -12,6 +12,8 @@ metadata: { "openclaw": { "requires": { "bins": ["s03ft"] } } }
 
 ## 什么时候暂停新开仓（满足任一条，否则只给建议）
 - `stop_missing`（critical）告警，且 status 显示该持仓的交易所端止损不在场。
+- `entry_partial_stuck`（critical）告警：入场单部分成交、剩余部分撤不掉，已成交部分没有止损（框架已自动拒绝新开仓；请提醒 Pocky 到交易所处理）。
+- `ft_exit_fill_fw_stop_crossed` 告警：价格穿过止损时引擎还没采用止损，已按市价离场；同一小时内出现 ≥ 2 次时暂停新开仓。
 - `ft_exit_fill_liquidation` 或 `ft_exit_fill_emergency_exit` 告警。
 - 同一小时内 `feed_stale` 或 `ref_deviation` 告警涉及 ≥ 2 个标的。
 - 你判断数据可能有误，继续开仓会基于错误数据。

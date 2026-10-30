@@ -52,7 +52,7 @@ FW_DEFAULTS = {
     "maint_margin_est": {"BTC": 0.004, "ETH": 0.005, "SOL": 0.01, "BNB": 0.01, "HYPE": 0.025, "_default": 0.025},
     "stop_min_pct": 0.8,
     "stop_max_pct": 3.0,
-    "stop_min_mode": os.environ.get("S03_STOP_MIN_MODE", "skip"),   # skip / floor；研究矩阵用环境变量切换
+    "stop_min_mode": "skip",                        # skip / floor；研究方案 stop_floor 通过 S03_RESEARCH_OVERRIDES 切换（只在回测里）
     "max_hold_days": 30,
     "event_times_utc": [],
     "event_before_min": 120,
@@ -66,13 +66,41 @@ FW_DEFAULTS = {
     "news_venue": "binance",                        # 交易所级事件（该交易所被盗、暂停提现等）会封禁全部交易对
     "news_max_age_min": 30.0,
     # 研究用压力方案 delay1：入场信号推迟 N 根 K 线（只在回测 / hyperopt 里生效，实盘与 dry-run 忽略）
-    "research_entry_delay_bars": int(os.environ.get("S03_ENTRY_DELAY_BARS", "0") or 0),
+    "research_entry_delay_bars": 0,
     # 成交价比下单价更优、按成交价算的止损距离低于下限时怎么办（v2.7，由你决定；研究方案 fill_exit / fill_keep 可对比）：
     #   widen：止损放宽到下限 + 0.02 个百分点（风险仍在预算内，但止损不在原结构位）——v2.6 的行为，默认
     #   exit ：立即离场（最贴近“结构太近就不做”，代价是一笔往返成本）
     #   keep ：保留原结构止损（违反距离下限）
-    "better_fill_policy": os.environ.get("S03_BETTER_FILL_POLICY") or "widen",
+    "better_fill_policy": "widen",
+    # 入场单部分成交、撤剩余部分没有完成（freqtrade 拒绝撤单或撤单后仍是挂单）超过这么多秒：记错误日志（示例值）。
+    # 只要还有部分成交的入场单挂着，框架就拒绝一切新开仓（不论是否超时）。监控进程另有 critical 告警（entry_partial_stuck）。
+    "partial_fill_alert_sec": 60,
+    # 引擎采用的止损与框架止损相差多少（相对比例）以内算“已采用”：覆盖交易所按价格精度取整（示例值）
+    "stop_adopted_tol": 0.0005,
+    # 框架止损保护（v2.10）：freqtrade 的 StoplossGuard 只统计 stop_loss / stoploss_on_exchange / trailing_stop_loss / liquidation，
+    # 不统计框架的 fw_stop_crossed、fw_invalid_stop:*（都以 custom_exit 离场）。这里用同样的参数把两类合并计数（与 protections 一致）。
+    "stop_guard_trades": 6,
+    "stop_guard_lookback_min": 7 * 1440,
+    "stop_guard_duration_min": 1440,
 }
+
+# 研究方案可以覆盖的参数（v2.8）：由研究脚本通过环境变量 S03_RESEARCH_OVERRIDES（JSON）传入，
+# 优先级高于策略的 framework_params，且只在回测 / hyperopt 里生效（实盘与 dry-run 一律忽略）。
+# v2.7 用 S03_STOP_MIN_MODE 等环境变量改 FW_DEFAULTS，策略的 framework_params 会把它覆盖掉，方案实际没跑（外部审查 v2.7 P2）。
+RESEARCH_KEYS = ("stop_min_mode", "research_entry_delay_bars", "better_fill_policy")
+# 压力方案（v2.9，外部审查 v2.8 P2-2）：框架要求的最低集合，策略不能去掉；默认集合里其余的方案，去掉要在
+# research_stress_waivers 里写明理由（例如纯市价入场的策略去掉 delay1），理由写进清单和判定报告。
+MIN_RESEARCH_STRESS = ("cost2x", "stopslip")
+DEFAULT_RESEARCH_STRESS = ("cost2x", "delay1", "stopslip")
+RESEARCH_RUNMODES = ("backtest", "hyperopt")
+# 止损类离场原因：freqtrade 自带的 + 框架的（v2.10）。研究的 stopslip 压力与框架止损保护都按这一份分类。
+ENGINE_STOP_EXITS = ("stop_loss", "stoploss_on_exchange", "trailing_stop_loss", "liquidation")
+FW_STOP_EXIT_PREFIXES = ("fw_stop_crossed", "fw_invalid_stop")
+
+
+def is_stop_exit(reason) -> bool:
+    r = str(reason or "")
+    return r in ENGINE_STOP_EXITS or r.startswith(FW_STOP_EXIT_PREFIXES)
 
 
 # ============================================================== 纯函数（便于测试）
@@ -156,19 +184,37 @@ class FrameworkStrategy(IStrategy):
     # 研究：上线判定必须通过的压力方案（随策略而定，v2.7）。可选：cost2x（手续费与滑点加重）、delay1（入场推迟一根 K 线）、
     # stopslip（止损离场再扣额外滑点，事后近似）。例如只用市价入场的策略可以去掉 delay1；止损很窄的策略应保留 stopslip。
     # 改动要写进策略规格（docs/STRATEGY_TEMPLATE.md），并在 research plan / portfolio 之前定好。
-    research_stress: tuple = ("cost2x", "delay1", "stopslip")
+    research_stress: tuple = DEFAULT_RESEARCH_STRESS   # 不能去掉 MIN_RESEARCH_STRESS；去掉 delay1 要在下面写理由
+    research_stress_waivers: dict = {}                 # 例如 {"delay1": "只用市价单入场，信号到下单没有排队等待"}
     research_stop_slip: float = 0.002          # stopslip 方案每次止损额外扣的滑点（名义价值的比例，示例值）
     framework_params: dict = {}                # 子类覆盖框架参数，例如 {"risk_per_trade": 0.003}
 
     @property
     def fw(self) -> dict:
-        return {**FW_DEFAULTS, **(self.framework_params or {})}
+        return {**FW_DEFAULTS, **(self.framework_params or {}), **self._research_overrides()}
+
+    def _runmode(self) -> str:
+        return getattr(getattr(getattr(self, "dp", None), "runmode", None), "value", "") or ""
+
+    def _research_overrides(self) -> dict:
+        """研究方案的参数覆盖（只在回测 / hyperopt 里生效）。JSON 无效或含未知参数时报错：研究不能悄悄跑错方案。"""
+        raw = os.environ.get("S03_RESEARCH_OVERRIDES", "")
+        if not raw or self._runmode() not in RESEARCH_RUNMODES:
+            return {}
+        ov = json.loads(raw)
+        if not isinstance(ov, dict):
+            raise ValueError("S03_RESEARCH_OVERRIDES 必须是 JSON 对象")
+        unknown = set(ov) - set(RESEARCH_KEYS)
+        if unknown:
+            raise ValueError(f"S03_RESEARCH_OVERRIDES 含不允许的参数：{sorted(unknown)}")
+        return ov
 
     @property
     def protections(self):
+        fw = self.fw
         return [
-            {"method": "StoplossGuard", "lookback_period": 7 * 1440, "trade_limit": 6,
-             "stop_duration": 1440, "only_per_pair": False},
+            {"method": "StoplossGuard", "lookback_period": fw["stop_guard_lookback_min"], "trade_limit": fw["stop_guard_trades"],
+             "stop_duration": fw["stop_guard_duration_min"], "only_per_pair": False},
             {"method": "MaxDrawdown", "calculation_mode": "equity", "lookback_period": 1440,
              "trade_limit": 1, "stop_duration": 1440, "max_allowed_drawdown": 0.02},
             {"method": "MaxDrawdown", "calculation_mode": "equity", "lookback_period": 7 * 1440,
@@ -195,8 +241,7 @@ class FrameworkStrategy(IStrategy):
         if df is None or df.empty or "enter_long" not in df.columns:
             return df
         delay = int(self.fw.get("research_entry_delay_bars") or 0)
-        runmode = getattr(getattr(getattr(self, "dp", None), "runmode", None), "value", "")
-        if delay > 0 and runmode in ("backtest", "hyperopt"):
+        if delay > 0 and self._runmode() in RESEARCH_RUNMODES:
             cols = [c for c in ("enter_long", "fw_stop", "fw_entry_cap", "enter_tag") if c in df.columns]
             df[cols] = df[cols].shift(delay)
             df["enter_long"] = df["enter_long"].fillna(0)
@@ -327,8 +372,7 @@ class FrameworkStrategy(IStrategy):
     def _news_block(self, pair: str, now: datetime) -> str | None:
         """返回封禁原因（如 "security:SOL"），没有封禁返回 None。与 fwresearch.blockbeats.load_blocks 同一口径。"""
         f = self.fw.get("news_file")
-        runmode = getattr(getattr(getattr(self, "dp", None), "runmode", None), "value", "")
-        if not f or not os.path.exists(f) or runmode in ("backtest", "hyperopt"):
+        if not f or not os.path.exists(f) or self._runmode() in RESEARCH_RUNMODES:
             return None
         mt = os.path.getmtime(f)
         if FrameworkStrategy._news_cache[0] != mt:
@@ -386,6 +430,14 @@ class FrameworkStrategy(IStrategy):
         equity = self.wallets.get_total_stake_amount()
         new_risk = amount * (rate - stop)
         open_trades = Trade.get_trades_proxy(is_open=True)
+        stuck = [t.pair for t in open_trades if self._partial_entry_open(t)]
+        if stuck:
+            logger.info("有部分成交、尚未撤完的入场单（%s）：拒绝新开仓：%s", ",".join(stuck), pair)
+            return False
+        guard = self._stop_guard_reason(current_time)
+        if guard:
+            logger.info("框架止损保护：%s，拒绝新开仓：%s", guard, pair)
+            return False
         open_risk = self._open_risk(open_trades)
         if open_risk is None:
             logger.info("已有仓位或挂单缺少止损 / 计划，拒绝新增风险：%s", pair)
@@ -406,10 +458,43 @@ class FrameworkStrategy(IStrategy):
         return any(getattr(o, "ft_order_side", None) == side and getattr(o, "ft_is_open", False)
                    for o in (getattr(t, "orders", None) or []))
 
+    def _stop_guard_reason(self, now: datetime) -> str | None:
+        """与 StoplossGuard 同参数，但把框架的止损类离场（fw_stop_crossed、fw_invalid_stop:*）一起计数（v2.10，外部审查 v2.9 P1-2）。
+        最近一笔止损类亏损离场之前的回看期内达到 trade_limit 笔、且距今不到 stop_duration：拒绝新开仓。
+        只有计数里含框架离场原因时才由这里拒绝（纯 freqtrade 原因由 StoplossGuard 自己处理，结果相同）。"""
+        fw = self.fw
+        now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+        since = now - timedelta(minutes=fw["stop_guard_lookback_min"] + fw["stop_guard_duration_min"])
+        closed = Trade.get_trades_proxy(is_open=False, close_date=since)
+        hits = sorted(((t.close_date_utc, str(t.exit_reason)) for t in closed
+                       if is_stop_exit(t.exit_reason) and (t.close_profit or 0) < 0), key=lambda x: x[0])
+        if not hits:
+            return None
+        last = hits[-1][0]
+        if now >= last + timedelta(minutes=fw["stop_guard_duration_min"]):
+            return None
+        window = [r for c, r in hits if c >= last - timedelta(minutes=fw["stop_guard_lookback_min"])]
+        if len(window) >= fw["stop_guard_trades"] and any(r.startswith(FW_STOP_EXIT_PREFIXES) for r in window):
+            return f"{len(window)} 次止损类亏损离场（含框架离场 {sum(r.startswith(FW_STOP_EXIT_PREFIXES) for r in window)} 次）"
+        return None
+
+    @staticmethod
+    def _partial_entry_open(t) -> bool:
+        """有已部分成交、仍挂着的入场单：已成交部分在交易所上没有止损（freqtrade 在入场单挂着时不更新仓位）。"""
+        side = getattr(t, "entry_side", "buy")
+        return any(getattr(o, "ft_order_side", None) == side and getattr(o, "ft_is_open", False)
+                   and float(getattr(o, "filled", 0) or 0) > 0 for o in (getattr(t, "orders", None) or []))
+
+    def _order_stop(self, t) -> float | None:
+        """下单时实际生效的止损（v2.8）：计划止损按下单价过护栏（floor 模式会被抬到下限）——与定仓用的是同一个值。
+        v2.7 挂单风险用的是计划里的原始止损，floor 模式下比定仓用的止损近，在险风险少算（外部审查 v2.7 P1-1）。"""
+        px = getattr(t, "open_rate_requested", None) or getattr(t, "open_rate", None)
+        return self._plan_stop(getattr(t, "enter_tag", None), float(px)) if px else None
+
     def _open_risk(self, open_trades) -> float | None:
         """已占用的止损风险（v2.7 修正）：
         - 入场已走完：绑定的止损 × 当前持仓数量 trade.amount；
-        - 入场还在进行（未成交或部分成交、单子仍挂着）：止损（已绑定的，否则用计划止损）× 下单数量 amount_requested，
+        - 入场还在进行（未成交或部分成交、单子仍挂着）：止损（已绑定的，否则用下单时生效的止损 _order_stop）× 下单数量 amount_requested，
           价格用下单价 open_rate_requested。freqtrade 新建交易时 amount = 0，挂单期间不会更新它；
           v2.6 乘的是 trade.amount，挂单风险实际按 0 计算（外部审查 v2.6 P1-1）。
         任何一笔既没有绑定止损、也读不出计划（或已判为无效、正在离场）时返回 None：信息缺失时不再新增风险。"""
@@ -421,11 +506,12 @@ class FrameworkStrategy(IStrategy):
                 sp = self._bind_stop(t)                     # 已成交但还没绑定（例如刚重启）：现在绑定
                 if sp is None:
                     return None
-            if sp is None:                                  # 入场还在进行：按计划止损
-                plan = decode_plan(getattr(t, "enter_tag", None))
-                if plan is None or t.get_custom_data("fw_invalid"):
+            if sp is None:                                  # 入场还在进行：按下单时生效的止损（与定仓一致）
+                if t.get_custom_data("fw_invalid"):
                     return None
-                sp = plan["stop"]
+                sp = self._order_stop(t)
+                if sp is None:
+                    return None
             if in_flight:
                 qty = max(float(getattr(t, "amount_requested", 0) or 0), float(t.amount or 0))
                 px = float(getattr(t, "open_rate_requested", None) or t.open_rate)
@@ -437,10 +523,13 @@ class FrameworkStrategy(IStrategy):
         return total
 
     def check_entry_timeout(self, pair, trade, order, current_time, **kwargs) -> bool:
-        """入场单一旦部分成交，就撤掉剩余部分（v2.7，外部审查 v2.6 P0）。
+        """入场单一旦部分成交，就请求撤掉剩余部分（v2.7，外部审查 v2.6 P0）。
         freqtrade 在入场单仍挂着时不更新 trade.amount，has_open_position = False，交易所上不会挂任何止损，
         直到整单成交或超时撤单。撤掉剩余后，已成交部分成为正式仓位，下一轮循环（约 5 秒）绑定止损并挂到交易所。
-        freqtrade 每轮都对挂着的入场单调用本回调；返回 True = 按超时撤单（已成交部分保留）。"""
+        返回 True = 按超时撤单（已成交部分保留）。
+
+        注意（v2.9，外部审查 v2.8 P1-1）：订单超过 unfilledtimeout（入场 3 分钟）后，freqtrade 直接按超时处理、
+        不再调用本回调，所以撤单失败的监测与告警不能放在这里——在 bot_loop_start 里做（每轮都调用）。"""
         try:
             filled = float(getattr(order, "filled", 0) or 0)
             if filled > 0 and getattr(order, "status", "open") == "open":
@@ -449,6 +538,44 @@ class FrameworkStrategy(IStrategy):
         except Exception:
             logger.exception("检查入场单状态出错：%s", pair)
         return False
+
+    def bot_loop_start(self, current_time: datetime, **kwargs) -> None:
+        """每轮循环开始时调用（不受订单超时分支影响）。子类覆盖时必须调用 super().bot_loop_start(current_time, **kwargs)。"""
+        if self._runmode() in RESEARCH_RUNMODES:
+            return
+        try:
+            self._watch_partial_entries(current_time, Trade.get_trades_proxy(is_open=True))
+        except Exception:
+            logger.exception("部分成交监测出错")
+
+    def _watch_partial_entries(self, current_time: datetime, open_trades) -> list:
+        """部分成交、撤单没完成的入场单（v2.9）：首次发现时间存进交易的 custom data（数据库，重启后不丢）；
+        超过 partial_fill_alert_sec 仍未解决，记一次 ERROR 并标记 entry_stuck_since。
+        这期间已成交部分在交易所上没有止损，freqtrade 也不能对它下离场单；新开仓由 _confirm_entry 拒绝。
+        监控进程从 /status 读同样的状态，发 critical 告警（monitor 的 entry_partial_stuck 规则）。返回本轮判为卡住的交易。"""
+        now = current_time if current_time.tzinfo else current_time.replace(tzinfo=timezone.utc)
+        stuck = []
+        for t in open_trades:
+            since_raw = t.get_custom_data("partial_since")
+            if not self._partial_entry_open(t):
+                if since_raw and not t.get_custom_data("partial_resolved_at"):
+                    t.set_custom_data("partial_resolved_at", now.isoformat())
+                    logger.info("%s 部分成交的入场单已结束（成交或撤单完成）", t.pair)
+                continue
+            if not since_raw or t.get_custom_data("partial_resolved_at"):
+                since = now
+                t.set_custom_data("partial_since", now.isoformat())
+                t.set_custom_data("partial_resolved_at", "")
+            else:
+                since = datetime.fromisoformat(str(since_raw))
+            age = (now - since).total_seconds()
+            if age >= self.fw["partial_fill_alert_sec"]:
+                stuck.append(t)
+                if not t.get_custom_data("entry_stuck_since"):
+                    t.set_custom_data("entry_stuck_since", since.isoformat())
+                    logger.error("%s 入场单部分成交 %d 秒后剩余部分仍未撤掉：已成交部分在交易所上没有止损。"
+                                 "新开仓已暂停；请在交易所核对并手动处理（撤单或补挂止损）", t.pair, int(age))
+        return stuck
 
     def informative_pairs(self):
         """相关性检查需要白名单全部交易对的日线：在这里固定订阅（实盘 dp 只返回订阅过的数据）。
@@ -492,34 +619,66 @@ class FrameworkStrategy(IStrategy):
         if plan is None:
             reason = "no_plan"
         else:
-            stop = plan["stop"]
+            stop = self._order_stop(trade) or plan["stop"]    # 下单时生效的止损（floor 模式已抬到下限），与定仓一致
             dist = (fill - stop) / fill * 100 if fill > 0 else -1
             if stop >= fill:
                 reason = "stop_not_below_fill"
             elif dist > fw["stop_max_pct"] + 1e-9:
                 reason = "stop_too_far"
             else:
-                if dist < fw["stop_min_pct"] + 0.02:          # 多留 0.02 个百分点：按价格最小变动单位取整后仍不低于下限
+                if dist < fw["stop_min_pct"] - 1e-6:          # 成交价更优，按成交价算的距离跌破下限
                     policy = fw.get("better_fill_policy", "widen")
                     if policy == "exit":
                         reason = "stop_too_close_after_fill"
                     elif policy == "keep":
                         trade.set_custom_data("stop_kept_below_min", True)
                     else:
-                        stop = fill * (1 - (fw["stop_min_pct"] + 0.02) / 100)
+                        stop = fill * (1 - (fw["stop_min_pct"] + 0.02) / 100)   # 多留 0.02 个百分点：按价格最小变动单位取整后仍不低于下限
                         trade.set_custom_data("stop_widened", True)
+                elif dist < fw["stop_min_pct"] + 0.02:        # 正好在下限附近（例如 floor 模式）：只为取整留余量，与成交价策略无关
+                    stop = fill * (1 - (fw["stop_min_pct"] + 0.02) / 100)
                 equity = self.wallets.get_total_stake_amount() if getattr(self, "wallets", None) else None
                 if not reason and equity and trade.amount * (fill - stop) > equity * fw["risk_per_trade"] * 1.05:
                     reason = "risk_over_budget"
         if reason:
             trade.set_custom_data("fw_invalid", reason)
             logger.error("交易 %s 的止损无法绑定（%s）：将立即离场", trade.pair, reason)
+            self._log_risk(trade, None, reason)
             return None
         trade.set_custom_data("stop_px", float(stop))
         trade.set_custom_data("plan_stop", float(plan["stop"]))
+        trade.set_custom_data("order_stop", float(self._order_stop(trade) or plan["stop"]))
         trade.set_custom_data("init_stake", float(trade.stake_amount))
         trade.set_custom_data("init_amount", float(trade.amount))
+        trade.set_custom_data("fw_init_risk", float(trade.amount) * (fill - float(stop)))   # 复盘 R 的分母（v2.10）
+        self._log_risk(trade, float(stop), "")
         return float(stop)
+
+    def _log_risk(self, trade, stop: float | None, invalid: str) -> None:
+        """回测 / hyperopt 时把每笔的初始风险写进旁路文件（v2.11，外部审查 v2.10 P1-2）。freqtrade 的回测导出和 REST 接口
+        都不带 custom data，研究端以前只能事后推算（用默认的止损上下限）。路径由研究脚本按每次运行设置（S03_RISK_LOG）。
+        止损无效、立即离场的交易：初始风险按下单时生效的止损 × 成交量（这是下单时承担的风险预算）。"""
+        path = os.environ.get("S03_RISK_LOG", "")
+        if not path or self._runmode() not in RESEARCH_RUNMODES:
+            return
+        try:
+            fw, amt, fill = self.fw, float(trade.amount or 0), float(trade.open_rate)
+            px = float(getattr(trade, "open_rate_requested", None) or fill)
+            order_stop = self._order_stop(trade)
+            if stop is not None:
+                risk = amt * (fill - stop)
+            elif order_stop is not None and px > order_stop:
+                risk = amt * (px - order_stop)
+            else:
+                risk = None
+            rec = {"pair": trade.pair, "open_ts": int(trade.open_date_utc.timestamp()), "amount": amt, "open_rate": fill,
+                   "order_price": px, "order_stop": order_stop, "stop": stop, "init_risk": risk, "invalid": invalid or None,
+                   "widened": bool(trade.get_custom_data("stop_widened")), "kept_below_min": bool(trade.get_custom_data("stop_kept_below_min")),
+                   **{k: fw[k] for k in ("stop_min_pct", "stop_max_pct", "stop_min_mode", "better_fill_policy")}}
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+        except Exception:                                 # noqa: BLE001  记录失败只影响研究（缺记录 → R 未知 → 证据不足）
+            logger.exception("写初始风险记录失败：%s", trade.pair)
 
     def order_filled(self, pair, trade, order, current_time, **kwargs) -> None:
         if order.ft_order_side == trade.entry_side:
@@ -530,7 +689,21 @@ class FrameworkStrategy(IStrategy):
         sp = self._bind_stop(trade)
         if sp is None:
             return None                                   # 无效仓位由 custom_exit 立即离场
+        if current_rate <= sp:
+            # 价格已经穿过止损：stoploss_from_absolute 会返回 0，freqtrade 把 0 当成无效值丢掉，引擎止损停在兜底价
+            # （10 倍杠杆约 −9.9%）。这里不返回 0，由 custom_exit 立即市价离场（v2.9，外部审查 v2.8 P0）。
+            return None
         return stoploss_from_absolute(sp, current_rate, is_short=False, leverage=trade.leverage)
+
+    def _stop_adopted(self, trade, sp: float) -> bool:
+        """引擎（和交易所端止损）是否已经采用框架止损：trade.stop_loss 不低于 sp（允许按价格精度取整的误差）。"""
+        cur = getattr(trade, "stop_loss", None)
+        return cur is not None and float(cur) >= sp * (1 - self.fw["stop_adopted_tol"])
+
+    def _stop_crossed(self, trade, sp: float | None, rate: float) -> bool:
+        """价格已经到达或穿过框架止损，而引擎还没采用这个止损（首次绑定前价格已跌破、重启恢复、成交确认延迟）。
+        引擎已采用时交给引擎 / 交易所端止损处理，避免重复离场。"""
+        return sp is not None and rate is not None and float(rate) <= sp and not self._stop_adopted(trade, sp)
 
     # ---------------------------------------------------------- 分批与离场
     TP_MAX_ATTEMPTS = 3
@@ -575,8 +748,15 @@ class FrameworkStrategy(IStrategy):
         return None
 
     def custom_exit(self, pair, trade, current_time, current_rate, current_profit, **kwargs):
-        if self._bind_stop(trade) is None and trade.get_custom_data("fw_invalid"):
+        sp = self._bind_stop(trade)
+        if sp is None and trade.get_custom_data("fw_invalid"):
             return f"fw_invalid_stop:{trade.get_custom_data('fw_invalid')}"
+        if self._stop_crossed(trade, sp, current_rate):
+            if not trade.get_custom_data("stop_crossed_at"):
+                trade.set_custom_data("stop_crossed_at", current_time.isoformat())
+                logger.error("%s 价格 %s 已穿过框架止损 %s，引擎止损仍为 %s：立即市价离场（离场失败时每轮重试）",
+                             pair, current_rate, sp, getattr(trade, "stop_loss", None))
+            return "fw_stop_crossed"
         if current_time - trade.open_date_utc >= timedelta(days=self.fw["max_hold_days"]):
             return "max_hold"
         df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)

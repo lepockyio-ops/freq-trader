@@ -52,7 +52,10 @@ def factors_md(res: dict[str, Any], top: int = 20) -> str:
 
 
 def stats_md(res: dict[str, Any], title: str = "统计检验报告") -> str:
-    lines = [f"# {title}（程序生成）", "", f"- 交易笔数：{res['n_trades']}", f"- 结论：**{res['verdict']}**"
+    cov = res.get("coverage") or {}
+    lines = [f"# {title}（程序生成）", "", f"- 交易笔数：{res['n_trades']}（R 有效）" +
+             (f"；全部 {cov['n_total']} 笔，R 未知 {cov['n_r_unknown']} 笔，未知部分净盈亏 {cov['unknown_pnl']}" if cov.get("n_r_unknown") else ""),
+             f"- 结论：**{res['verdict']}**"
              + (f"（{res.get('reason')}）" if res.get("reason") else ""),
              f"- 阈值：{res['gate_label']}"]
     if res.get("failed"):
@@ -61,7 +64,7 @@ def stats_md(res: dict[str, Any], title: str = "统计检验报告") -> str:
     names = {"bootstrap_mean_R": "期望 R 的 Bootstrap 区间下限 > 0",
              "segment_consistency": "分段一致性：期望 R > 0 的时间段占比（同一批结果切段，不是训练-测试验证）",
              "block_bootstrap": "按周汇总 R 的 Bootstrap 区间下限 > 0", "holdout": "样本外段期望 R > 0",
-             "deflated_sharpe": "Deflated Sharpe（按尝试次数折扣）"}
+             "deflated_sharpe": "Deflated Sharpe（按尝试次数折扣）", "risk_known": "每笔初始风险都能确认（R 未知的交易不能被排除）"}
     if ch:
         lines += ["", "| 检验 | 结果 | 关键数字 |", "| --- | --- | --- |"]
         for k, c in ch.items():
@@ -75,6 +78,9 @@ def stats_md(res: dict[str, Any], title: str = "统计检验报告") -> str:
                        if "error" not in c else c["error"])
             elif k == "block_bootstrap":
                 num = (f"{c['blocks']} 个时间块，区间 [{c['ci_lower']}, {c['ci_upper']}]" if "error" not in c else c["error"])
+            elif k == "risk_known":
+                num = (f"共 {c['n_total']} 笔，R 有效 {c['n_r_known']} 笔，未知 {c['n_r_unknown']} 笔"
+                       + (f"（净盈亏 {c['unknown_pnl']}）" if c.get("n_r_unknown") else ""))
             elif k == "holdout":
                 num = (f"自 {c['start']} 起入场 {c['n']} 笔，期望 R {c['mean_R']}；跨边界排除 {c.get('n_straddle_excluded')} 笔，"
                        f"占时间 {c.get('holdout_time_frac')}" if "mean_R" in c else c.get("error") or c.get("note", ""))
@@ -130,6 +136,25 @@ def verdict_md(res: dict[str, Any]) -> str:
     for k, v in res["stress"].items():
         p = {True: "通过", False: "不通过", None: "无法判定"}[v.get("pass")]
         lines.append(f"| {k} | {v.get('state')} | {v.get('n', '')} | {v.get('mean_R', '')} | {p}：{v.get('error', '')} |")
+    pc = res.get("pbo") or {}
+    lines += ["", f"- 过拟合概率 PBO：{pc.get('pbo', '—')}（门槛 < {pc.get('gate', '—')}，"
+                  f"{ {True: '通过', False: '不通过', None: '无法判定'}[pc.get('pass')] }"
+                  f"{'：' + pc['error'] if pc.get('error') else ''}）；DSR 尝试次数 {res.get('n_trials', '—')}"]
+    cr = res.get("candidates_risk_known") or {}
+    if cr.get("error"):
+        lines += [f"- 候选方案风险完整性：无法判定（{cr['error']}）"]
+    tr = res.get("trials") or {}
+    if tr:
+        lines += [f"- Sharpe 离散度：{tr.get('trial_sharpe_std')}（来源：{tr.get('trial_sharpe_std_source')}）"]
+    if pc.get("source"):
+        lines += [f"- PBO 来源：{pc['source']}"]
+    if res.get("stress_waivers"):
+        lines += [f"- 策略去掉的默认压力方案及理由：{res['stress_waivers']}"]
+    hb = res.get("holdout_binding") or {}
+    if hb.get("error"):
+        lines += [f"- 样本外登记：{hb['error']}"]
+    if res.get("experiment"):
+        lines += [f"- 实验：{res['experiment']}"]
     if res.get("data_gaps"):
         lines += ["", "研究数据缺口（存在时最多判“证据不足”）：", ""] + [f"- {g}" for g in res["data_gaps"]]
     lines += ["", "运行记录：", ""] + [f"- {k}：{v}" for k, v in res.get("runs", {}).items()]

@@ -64,6 +64,33 @@ def test_positions_from_freqtrade_status():
     assert positions_from_ft(trades, require_exchange_stop=False)[1].has_exchange_stop
 
 
+def test_pending_entries_are_not_stop_missing_but_stuck_partials_are_critical():
+    """审查 v2.8 P2-1：挂着的入场单（数量 0、带兜底止损价）被当成“有持仓缺止损”误报；部分成交卡住的单子没有告警。"""
+    from alerts_core import AlertConfig, AlertEngine
+    from binance_monitor import partial_entries_from_ft
+
+    pending = {"pair": "ETH/USDT:USDT", "is_open": True, "is_short": False, "open_rate": 3000.0, "amount": 0.0,
+               "stop_loss_abs": 30.0, "orders": [{"ft_order_side": "buy", "is_open": True, "filled": 0.0}]}
+    partial = {"pair": "SOL/USDT:USDT", "is_open": True, "is_short": False, "open_rate": 100.0, "amount": 0.0,
+               "stop_loss_abs": 1.0, "orders": [{"ft_order_side": "buy", "is_open": True, "filled": 0.4,
+                                                 "order_timestamp": 1_800_000_000_000}]}
+    assert positions_from_ft([pending, partial]) == []
+    ents = partial_entries_from_ft([pending, partial])
+    assert [(e.coin, e.filled) for e in ents] == [("SOL", 0.4)]
+    eng = AlertEngine(AlertConfig())
+    assert eng.check_partial_entries(ents, 1000.0) == []
+    a = eng.check_partial_entries(ents, 1061.0)
+    assert len(a) == 1 and a[0].rule == "entry_partial_stuck" and a[0].severity == "critical"
+    assert eng.check_partial_entries([], 1100.0) == [] and eng.stats["SOL"].partial_since is None   # 解决后复位
+
+
+def test_stop_crossed_exit_is_critical(tmp_path):
+    m = BinanceMonitor(MonitorConfig(journal_path=str(tmp_path / "a.jsonl"), webhook_port=0))
+    for reason in ("fw_stop_crossed", "fw_invalid_stop:risk_over_budget"):
+        a = m.on_ft_event({"type": "exit_fill", "pair": "SOL/USDT:USDT", "exit_reason": reason, "profit_amount": -30})
+        assert a.severity == "critical", reason
+
+
 def test_example_config_loads():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cfg = load_config(os.path.join(root, "monitor", "monitor.example.toml"))
@@ -101,3 +128,26 @@ def test_webhook_server_roundtrip(tmp_path):
         assert r.status == 200
     rec = [r for r in m.journal.read() if r["kind"] == "alert"][0]
     assert rec["rule"] == "ft_status" and rec["severity"] == "warning"
+
+
+def test_status_read_failures_keep_timers_and_alert():
+    """审查 v2.9 P2-1：读不到 /status 时传空列表，部分成交与缺止损的计时被清零，215 秒的序列没有告警。"""
+    from alerts_core import AlertConfig, AlertEngine, PartialEntryView
+
+    eng = AlertEngine(AlertConfig())
+    ent = [PartialEntryView("SOL", 0.4, 0.0)]
+    got = []
+    for t in range(0, 220, 5):
+        ok = (t // 5) % 2 == 0                                        # 间歇读取失败
+        got += eng.check_ft_status(ok, float(t))
+        if ok:
+            got += eng.check_partial_entries(ent, float(t))
+    assert any(a.rule == "entry_partial_stuck" for a in got)
+    eng2 = AlertEngine(AlertConfig())
+    eng2.check_partial_entries(ent, 0.0)
+    alerts = [a for t in range(5, 130, 5) for a in eng2.check_ft_status(False, float(t))]   # 一直读不到
+    stale = [a for a in alerts if a.rule == "ft_status_stale"]
+    assert stale and stale[0].severity == "critical" and eng2.stats["SOL"].partial_since == 0.0
+    eng3 = AlertEngine(AlertConfig())
+    w = [a for t in range(0, 130, 5) for a in eng3.check_ft_status(False, float(t))]
+    assert w and w[0].severity == "warning"

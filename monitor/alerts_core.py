@@ -32,6 +32,8 @@ class AlertConfig:
     # 持仓类
     near_stop_r: float = 0.3              # 价格距离止损 < 0.3R
     stop_missing_grace_s: int = 20        # 有持仓但交易所端无止损，持续超过 20 秒才告警
+    partial_entry_grace_s: int = 60       # 入场单部分成交、剩余部分仍挂着超过 60 秒（已成交部分没有止损）→ critical（示例值）
+    ft_status_stale_s: int = 60           # 连续读不到 freqtrade /status 超过 60 秒告警（示例值）
     # 资金费率与参考价
     funding_pctile: float = 0.95          # 超过近 30 天历史的 95% 分位
     funding_abs_floor: float = 0.0001     # 且绝对值 ≥ 0.01%/期（避免低波动期误报）
@@ -42,7 +44,7 @@ class AlertConfig:
     cooldown_s: int = 15 * 60             # 同一标的、同一规则 15 分钟内只告警一次
     crit_cooldown_s: int = 5 * 60
     max_llm_per_hour: int = 6             # 每小时最多转给 OpenClaw 6 次；critical 不占额度
-    rules_enabled: tuple[str, ...] = ("shock_1m", "range_15m", "near_stop", "stop_missing",
+    rules_enabled: tuple[str, ...] = ("shock_1m", "range_15m", "near_stop", "stop_missing", "entry_partial_stuck", "ft_status_stale",
                                       "funding_extreme", "ref_deviation", "feed_stale")
 
 
@@ -80,6 +82,14 @@ class PositionView:
     since_ts: float                        # 入场成交时间（秒）
 
 
+@dataclass
+class PartialEntryView:
+    """部分成交、仍挂着的入场单（freqtrade 在这期间不更新持仓数量，交易所上没有止损）。"""
+    coin: str
+    filled: float
+    order_ts: float                        # 下单时间（秒）
+
+
 class _CoinStats:
     def __init__(self, cfg: AlertConfig):
         self.rets: deque[float] = deque(maxlen=cfg.shock_window)
@@ -91,6 +101,7 @@ class _CoinStats:
         self.last_price: float | None = None
         self.last_update: float | None = None
         self.stop_missing_since: float | None = None
+        self.partial_since: float | None = None
 
 
 def _std(xs) -> float:
@@ -201,6 +212,51 @@ class AlertEngine:
         return []
 
     # ------------------------------------------------------------------ 持仓与数据流（定时调用，建议每 5–10 秒）
+    _ft_ok_ts: float | None = None
+    _ft_fail_since: float | None = None
+
+    def check_ft_status(self, ok: bool, now: float | None = None) -> list[Alert]:
+        """freqtrade /status 读取结果（v2.10，外部审查 v2.9 P2-1）。读取失败时调用方不要再调 check_positions /
+        check_partial_entries（空列表会被当成“异常已经消失”而清零计时）；这里连续失败超过 ft_status_stale_s 告警：
+        失败前正在计时缺止损或部分成交 → critical，否则 warning。"""
+        now = now if now is not None else self.clock()
+        if ok:
+            self._ft_ok_ts, self._ft_fail_since = now, None
+            return []
+        if self._ft_fail_since is None:
+            self._ft_fail_since = now
+        age = now - self._ft_fail_since
+        if not self._on("ft_status_stale") or age < self.cfg.ft_status_stale_s:
+            return []
+        pending = [c for c, st in self.stats.items() if st.partial_since is not None or st.stop_missing_since is not None]
+        sev = SEV_CRIT if pending else SEV_WARN
+        detail = (f"连续 {int(age)} 秒读不到 freqtrade 状态" +
+                  (f"；读不到之前 {','.join(pending)} 正在计时缺止损或部分成交，计时保留" if pending else ""))
+        return self._emit(Alert("SYSTEM", "ft_status_stale", sev, round(age, 1), self.cfg.ft_status_stale_s, now, detail,
+                                {"pending": pending}))
+
+    def check_partial_entries(self, entries: list[PartialEntryView], now: float | None = None) -> list[Alert]:
+        """部分成交、撤单没完成的入场单：从第一次看到起持续超过 partial_entry_grace_s → critical。
+        计时从监控第一次看到开始（不依赖 freqtrade 的超时分支，也不读 freqtrade 日志）。"""
+        now = now if now is not None else self.clock()
+        out: list[Alert] = []
+        seen = {e.coin for e in entries}
+        for coin, st in self.stats.items():
+            if coin not in seen:
+                st.partial_since = None
+        if not self._on("entry_partial_stuck"):
+            return out
+        for e in entries:
+            st = self._st(e.coin)
+            if st.partial_since is None:
+                st.partial_since = now
+            age = now - st.partial_since
+            if age >= self.cfg.partial_entry_grace_s:
+                out += self._emit(Alert(e.coin, "entry_partial_stuck", SEV_CRIT, round(age, 1), self.cfg.partial_entry_grace_s,
+                                        now, f"入场单部分成交 {e.filled}，剩余部分 {int(age)} 秒仍未撤掉：已成交部分在交易所上没有止损，"
+                                             "新开仓已被框架暂停，需要人工在交易所处理", {"filled": e.filled}))
+        return out
+
     def check_positions(self, positions: list[PositionView], now: float | None = None) -> list[Alert]:
         now = now if now is not None else self.clock()
         out: list[Alert] = []

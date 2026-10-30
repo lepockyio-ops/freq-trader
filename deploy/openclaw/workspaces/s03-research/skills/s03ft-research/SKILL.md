@@ -12,7 +12,7 @@ metadata: { "openclaw": { "requires": { "bins": ["s03ft", "freqtrade"] } } }
 | 自检 | `s03ft doctor --research` |
 | 数据 | `freqtrade download-data -c user_data/config.json --timeframes 1d --timerange 20200101-`；`... --timeframes 1m 15m --timerange 20210101-` |
 | 事件历史 | `s03ft events build --out research/events_history.json --history`（BLS 只有 2025 年起的日程，报告中注明） |
-| 计划 | `s03ft research plan --pairs BTC,ETH,SOL,BNB,HYPE --years 2022-2025 --variants base,stop_floor,cost2x` |
+| 计划 | `s03ft research plan --idea <想法 id> --pairs BTC,ETH,SOL,BNB,HYPE --years 2022-2025 --variants base,stop_floor,cost2x` |
 | 单格 | `s03ft research run --job <任务>` |
 | 汇总 | `s03ft research aggregate` |
 | 复核 | `s03ft research verify --job <任务>` |

@@ -48,11 +48,23 @@ def main() -> int:
     # 复盘指标由程序计算（monitor/review_metrics.py），复盘 agent 只读结果
     sys.path.insert(0, os.environ.get("S03_FT_MONITOR_DIR", "/opt/s03/ft-s03/monitor"))
     try:
-        from review_metrics import compute, from_freqtrade, to_markdown
+        from review_metrics import compute, from_freqtrade, load_init_risk_db, strategy_stop_params, to_markdown
 
         with open(os.path.join(out, "ft_trades.json"), encoding="utf-8") as f:
             tr = json.load(f)
-        m = compute(from_freqtrade(tr.get("trades", []) if isinstance(tr, dict) else []))
+        # 初始风险：只读读取 freqtrade 数据库里框架记下的 fw_init_risk（REST 接口不返回 custom data）；读不到的原因写进报告
+        db = os.environ.get("S03_FT_DB", "/var/lib/s03-ft/tradesv3.sqlite")
+        risk, db_err = load_init_risk_db(db)
+        # 缺记录的交易：按服务器上策略实际的止损参数另算“估算 R”，单独列出，不计入主期望值
+        try:
+            with open(os.environ.get("S03_FT_CONFIG_FILE", "/etc/s03/ft-config.json"), encoding="utf-8") as f:
+                strat = json.load(f).get("strategy") or "MyStrategy"
+            est, est_err = strategy_stop_params(os.environ.get("S03_FT_STRATEGY_DIR", "/opt/s03/ft-s03/user_data/strategies"), strat)
+        except (OSError, ValueError) as e:
+            est, est_err = None, f"读不到策略配置：{type(e).__name__}"
+        m = compute(from_freqtrade(tr.get("trades", []) if isinstance(tr, dict) else [], risk, est))
+        m["risk_evidence"] = {"db": db, "db_error": db_err, "db_records": len(risk), "estimate_params": est,
+                              "estimate_error": est_err}
         with open(os.path.join(out, "metrics.json"), "w", encoding="utf-8") as f:
             json.dump(m, f, ensure_ascii=False, indent=1)
         with open(os.path.join(out, "metrics.md"), "w", encoding="utf-8") as f:

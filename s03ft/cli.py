@@ -8,7 +8,7 @@
   s03ft logs freqtrade|monitor|gate           最近 200 行日志
   s03ft gate status | gate pause <原因>       白名单代理：查看状态 / 暂停新开仓
   s03ft events build --out FILE [--history]   从美联储、BLS、BEA 官方日程生成事件文件
-  s03ft research plan|run|verify|aggregate|portfolio|g0 [参数…]   研究矩阵与组合回测（freqtrade）
+  s03ft research plan|run|verify|aggregate|portfolio|portfolio-verify|verdict|g0 [参数…]   研究矩阵与组合回测（freqtrade）
   s03ft lab factors|stats|matrix|idea [参数…]  研究前端：筛因子、统计检验、想法登记簿（docs/RESEARCH_LAB.md）
   s03ft lab vt-check [--vt-bin DIR]           Vibe-Trading 安装自检（默认 /opt/s03/vt-venv/bin）
   s03ft lab news check|blocks|daily|backfill|replay …  新闻（Odaily + BlockBeats）：自检、当前守卫、每日汇总、历史回填、守卫回放
@@ -384,7 +384,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--history", action="store_true")
     p.set_defaults(fn=cmd_events)
     p = sub.add_parser("research")
-    p.add_argument("sub", choices=["plan", "run", "verify", "aggregate", "portfolio", "verdict", "fingerprint", "g0"])
+    p.add_argument("sub", choices=["plan", "run", "verify", "aggregate", "portfolio", "portfolio-verify", "verdict", "fingerprint", "g0"])
     p.add_argument("args", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_research)
     p = sub.add_parser("lab")

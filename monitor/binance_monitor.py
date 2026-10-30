@@ -23,7 +23,7 @@ from pathlib import Path
 
 import requests
 
-from alerts_core import SEV_CRIT, SEV_INFO, SEV_WARN, Alert, AlertConfig, AlertEngine, PositionView
+from alerts_core import SEV_CRIT, SEV_INFO, SEV_WARN, Alert, AlertConfig, AlertEngine, PartialEntryView, PositionView
 from openclaw_notify import OpenClawConfig, OpenClawNotifier
 from sdnotify import notify
 
@@ -119,6 +119,8 @@ def positions_from_ft(trades: list[dict], require_exchange_stop: bool = True) ->
     for t in trades:
         if not t.get("is_open") or t.get("is_short"):
             continue
+        if t.get("amount") is not None and float(t.get("amount") or 0) <= 0:
+            continue                                    # 入场单还挂着、没有持仓：不是“缺止损”（v2.9，避免普通挂单误报）
         entry = t.get("open_rate")
         init_stop = t.get("stop_loss_abs")              # 框架止损按价格设定且不移动；initial_* 是兜底的 −99%
         cur_stop = init_stop
@@ -128,6 +130,19 @@ def positions_from_ft(trades: list[dict], require_exchange_stop: bool = True) ->
         ts = (t.get("open_fill_timestamp") or t.get("open_timestamp") or time.time() * 1000) / 1000
         out.append(PositionView(coin_of(t["pair"]), float(entry), float(init_stop), float(cur_stop),
                                 has_stop or not require_exchange_stop, ts))
+    return out
+
+
+def partial_entries_from_ft(trades: list[dict]) -> list[PartialEntryView]:
+    """有部分成交、仍挂着的入场单（只做多：入场方向 buy）。"""
+    out = []
+    for t in trades:
+        if not t.get("is_open") or t.get("is_short"):
+            continue
+        for o in t.get("orders") or []:
+            if o.get("ft_order_side") == "buy" and o.get("is_open") and float(o.get("filled") or 0) > 0:
+                ts = (o.get("order_timestamp") or time.time() * 1000) / 1000
+                out.append(PartialEntryView(coin_of(t["pair"]), float(o.get("filled") or 0), ts))
     return out
 
 
@@ -158,7 +173,8 @@ class BinanceMonitor:
                                        "index_px": m.get("i"), "funding_8h": m.get("r")})
 
     # ------------------------------------------------------------------ freqtrade 事件推送（webhook）
-    CRIT_EXITS = {"liquidation", "emergency_exit"}
+    CRIT_EXITS = {"liquidation", "emergency_exit", "fw_stop_crossed"}        # fw_stop_crossed：价格穿过止损时引擎还没采用止损
+    CRIT_EXIT_PREFIXES = ("fw_invalid_stop",)                                 # 成交后止损无效，立即离场
     WARN_EXITS = {"stop_loss", "stoploss_on_exchange", "trailing_stop_loss", "force_exit"}
 
     def on_ft_event(self, d: dict) -> Alert | None:
@@ -170,7 +186,8 @@ class BinanceMonitor:
         coin = str(d.get("pair", "SYSTEM")).split("/")[0] or "SYSTEM"
         reason = str(d.get("exit_reason") or "")
         if typ == "exit_fill":
-            sev = SEV_CRIT if reason in self.CRIT_EXITS else SEV_WARN if reason in self.WARN_EXITS else SEV_INFO
+            crit = reason in self.CRIT_EXITS or reason.startswith(self.CRIT_EXIT_PREFIXES)
+            sev = SEV_CRIT if crit else SEV_WARN if reason in self.WARN_EXITS else SEV_INFO
             detail = f"平仓成交：{reason or '未知原因'}，盈亏 {d.get('profit_amount')}"
             value = _num(d.get("profit_amount"))
         elif typ == "entry_fill":
@@ -306,14 +323,19 @@ class BinanceMonitor:
             notify("WATCHDOG=1")
             now = time.time()
             try:
+                ft_ok = True
                 try:
                     trades = self.ft.get("status")
                     pos = positions_from_ft(trades, self.cfg.require_exchange_stop)
+                    partial = partial_entries_from_ft(trades)
                 except Exception as e:
-                    pos = []
+                    ft_ok = False                            # 读不到 ≠ 没有异常：不调用持仓检查，保留计时（v2.10）
                     self.journal.write("error", where="ft_status", error=type(e).__name__)
                 with self.lock:
-                    self.handle(self.engine.check_positions(pos, now))
+                    self.handle(self.engine.check_ft_status(ft_ok, now))
+                    if ft_ok:
+                        self.handle(self.engine.check_positions(pos, now))
+                        self.handle(self.engine.check_partial_entries(partial, now))
                     self.handle(self.engine.check_feed(self.coins, now))
                 if now - last_ref >= self.cfg.ref_every_s:
                     last_ref = now

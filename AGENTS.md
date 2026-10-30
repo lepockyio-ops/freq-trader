@@ -33,9 +33,10 @@
 | 筛因子（5 个币，跨币种比较） | `s03ft lab factors --tf 1d` |
 | 偏差检查 | `s03ft research g0 --timerange 20250101-` |
 | 登记样本外起点（回测之前，只能一次） | `s03ft lab idea holdout --id <id> --start <日期>` |
-| 组合回测（主证据） | `s03ft research portfolio --all --timerange 20220101-` |
+| 组合回测（主证据） | `s03ft research portfolio --all --idea <id> --trials base,stop_floor --timerange 20220101-`（每次运行自动记入想法登记簿；候选方案供 PBO） |
 | 上线判定（唯一入口） | `s03ft research verdict --idea <id>` |
-| 研究矩阵（诊断） | `s03ft research plan …` / `run --job …` / `aggregate` / `verify --job …` |
+| 研究矩阵（诊断） | `s03ft research plan --idea <id> …` / `run --job …` / `aggregate` / `verify --job …` |
+| 复核组合回测 | `s03ft research portfolio-verify --variant base`（重跑并比较成交与最终 R，不改 latest） |
 | 诊断与单份检验（不是上线判定） | `s03ft lab matrix --idea <id>` 或 `s03ft lab stats --trades <csv> --idea <id>` |
 | 登记 / 推进想法（不含 approved） | `s03ft lab idea add|list|show|move|attach|trials …` |
 | 查看新闻事件守卫 | `s03ft lab news blocks --guard-out /var/lib/s03-news/news_blocks.json` |
@@ -50,7 +51,7 @@
 **写一个新策略插件**
 
 1. 在 `user_data/strategies/` 新建策略，继承 `FrameworkStrategy`；在 `populate_entry_trend()` 写 `enter_long` 和 `fw_stop`（绝对止损价）。
-2. 止损距离不合规时由框架处理，策略不要自己放宽；不要覆盖 `advise_entry`、`custom_stake_amount`、`leverage`、`confirm_trade_entry`、`order_filled`、`custom_stoploss`、`adjust_trade_position`、`custom_exit` 等框架回调；覆盖 `informative_pairs()` 时合并 `super().informative_pairs()`。
+2. 止损距离不合规时由框架处理，策略不要自己放宽；不要覆盖 `advise_entry`、`custom_stake_amount`、`leverage`、`confirm_trade_entry`、`order_filled`、`custom_stoploss`、`adjust_trade_position`、`custom_exit`、`check_entry_timeout`、`bot_loop_start` 等框架回调；覆盖 `informative_pairs()` 时合并 `super().informative_pairs()`。
 3. 在 `tests/` 加测试（参考 `tests/test_framework.py`），然后运行 `pytest -q` 和 `s03ft research g0`。
 4. 填 `docs/STRATEGY_TEMPLATE.md`，写明想法 id。改动以补丁或 PR 形式交给用户审阅。
 

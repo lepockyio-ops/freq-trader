@@ -185,8 +185,10 @@ def holdout_for(a) -> tuple[str | None, bool]:
 
 # ---------------------------------------------------------------- 上线判定（组合回测 + 必需压力方案）
 def load_portfolio_results(root: str, current_fp: str | None) -> tuple[dict, dict, list[str]]:
-    """读组合回测的标准目录：<root>/manifest.json（required_stress、fingerprint）与 <root>/<方案>/latest.json。
-    只接受状态成功、版本指纹与当前一致、CSV 存在且哈希一致的运行；其余记为失败（不会读到旧结果）。"""
+    """读组合回测的标准目录：<root>/manifest.json 与 <root>/<方案>/latest.json。
+    清单（v2.8）必须有实验标识 experiment_id（版本指纹 + 策略 + 时间段 + 交易对 + 必需方案）和 timerange，且属于当前版本；
+    每个运行必须状态成功、版本指纹与当前一致、实验标识与时间段与清单一致、带 CSV 哈希且哈希一致——否则不采用。
+    v2.7 不比对时间段、缺哈希时跳过校验、清单过期只警告（外部审查 v2.7 P1-3）。"""
     import hashlib
 
     rootp = Path(root)
@@ -195,6 +197,10 @@ def load_portfolio_results(root: str, current_fp: str | None) -> tuple[dict, dic
         raise SystemExit(f"找不到 {man_p}：先运行组合回测（freq-trader：s03ft research portfolio --all；"
                          "hyper-trader：scripts/research_matrix.py portfolio --all）")
     manifest = json.loads(man_p.read_text("utf-8"))
+    if not manifest.get("experiment_id") or not manifest.get("timerange"):
+        raise SystemExit("组合回测清单缺少实验标识或时间段（旧版本的清单）：用 research portfolio --all 重跑")
+    if current_fp and manifest.get("fingerprint") != current_fp:
+        raise SystemExit("组合回测清单属于旧版本（代码 / 配置 / 数据已变）：用 research portfolio --all 重跑")
     states: dict[str, dict] = {}
     for vdir in sorted(p for p in rootp.iterdir() if p.is_dir()):
         latest = vdir / "latest.json"
@@ -202,14 +208,23 @@ def load_portfolio_results(root: str, current_fp: str | None) -> tuple[dict, dic
             continue
         m = json.loads(latest.read_text("utf-8"))
         st = {"status": m.get("status"), "run_id": m.get("run_id"), "fingerprint": m.get("fingerprint"), "trades": None,
-              "data_gaps": list(m.get("data_gaps") or [])}
+              "data_gaps": list(m.get("data_gaps") or []), "started_at": m.get("started_at"),
+              "timerange": m.get("timerange"), "experiment_id": m.get("experiment_id")}
         if m.get("status") == "ok":
             csv = vdir / m.get("csv", "")
             if current_fp and m.get("fingerprint") != current_fp:
                 st.update(status="stale", error="版本指纹与当前代码 / 配置 / 数据不一致")
+            elif m.get("experiment_id") != manifest["experiment_id"]:
+                st.update(status="other_experiment", error="运行属于另一个实验（策略、时间段、交易对或必需方案不同）")
+            elif m.get("timerange") != manifest["timerange"]:
+                st.update(status="other_timerange", error=f"时间段 {m.get('timerange')} 与清单 {manifest['timerange']} 不一致")
+            elif not m.get("started_at"):
+                st.update(status="no_start_time", error="运行记录缺少开始时间，无法核对样本外登记是否在回测之前")
             elif not csv.is_file():
                 st.update(status="missing_csv", error="运行记录说成功，但逐笔文件不存在")
-            elif m.get("csv_sha256") and hashlib.sha256(csv.read_bytes()).hexdigest() != m["csv_sha256"]:
+            elif not m.get("csv_sha256"):
+                st.update(status="missing_hash", error="运行记录缺少逐笔文件哈希，无法核对")
+            elif hashlib.sha256(csv.read_bytes()).hexdigest() != m["csv_sha256"]:
                 st.update(status="tampered", error="逐笔文件与运行记录的哈希不一致")
             else:
                 st["trades"] = pd.read_csv(csv)
@@ -217,6 +232,104 @@ def load_portfolio_results(root: str, current_fp: str | None) -> tuple[dict, dic
             st["error"] = m.get("error") or m.get("stderr_tail", "")[-300:]
         states[vdir.name] = st
     return manifest, states, list(manifest.get("required_stress") or [])
+
+
+def timerange_bounds(tr: str | None) -> tuple[str | None, str | None]:
+    """freqtrade 的 --timerange（20220101-20250101 / 20220101-）→ (起, 止)；开放的一端为 None。"""
+    lo, _, hi = (tr or "").partition("-")
+    fmt = lambda x: f"{x[:4]}-{x[4:6]}-{x[6:8]}" if len(x) == 8 and x.isdigit() else None  # noqa: E731
+    return fmt(lo), fmt(hi)
+
+
+def matrix_evidence(results_dir: str, current_fp: str | None, idea: str | None = None) -> tuple[pd.DataFrame | None, list[str], dict]:
+    """严格读取研究矩阵（v2.9，供上线判定的 PBO；外部审查 v2.8 P1-2）：清单里**每一个**非压力方案的任务都必须
+    状态成功、版本指纹与清单和当前一致、带逐笔文件哈希且一致；各方案覆盖相同的（币种, 年份）。
+    任何一格不满足就返回问题清单（PBO 判“无法判定”），不会静默删掉失败的格子。返回（逐笔, 问题, 清单）。"""
+    import hashlib
+
+    rd = Path(results_dir)
+    jobs_file = rd.parent / "jobs.json"
+    try:
+        m = json.loads(jobs_file.read_text("utf-8"))
+    except (OSError, ValueError):
+        return None, [f"没有研究矩阵清单 {jobs_file}：先 research plan / run（至少 2 个非压力方案）"], {}
+    if not isinstance(m, dict):
+        return None, ["研究矩阵清单是旧格式：重新 research plan"], {}
+    problems = []
+    if current_fp and m.get("fingerprint") != current_fp:
+        problems.append("研究矩阵属于旧版本（代码 / 配置 / 数据已变）：重新 plan / run")
+    if idea and m.get("idea") != idea:
+        problems.append(f"研究矩阵属于想法 {m.get('idea')}，不是 {idea}")
+    cells: dict[str, set] = {}
+    frames = []
+    for j in m.get("jobs", []):
+        coin, year, variant = j.split("-", 2)
+        if variant in STRESS_VARIANTS:
+            continue
+        cells.setdefault(variant, set()).add((coin, year))
+        meta, csv = rd / f"{j}.json", rd / "trades" / f"{j}.csv"
+        try:
+            r = json.loads(meta.read_text("utf-8"))
+        except (OSError, ValueError):
+            problems.append(f"{j}：没有结果")
+            continue
+        if r.get("status") != "ok":
+            problems.append(f"{j}：状态 {r.get('status')}")
+        elif r.get("fingerprint") != m.get("fingerprint"):
+            problems.append(f"{j}：版本指纹与清单不一致")
+        elif not r.get("csv_sha256"):
+            problems.append(f"{j}：缺逐笔文件哈希")
+        elif not csv.is_file():
+            problems.append(f"{j}：逐笔文件不存在")
+        elif hashlib.sha256(csv.read_bytes()).hexdigest() != r["csv_sha256"]:
+            problems.append(f"{j}：逐笔文件与运行记录的哈希不一致")
+        else:
+            f = pd.read_csv(csv)
+            if len(f):
+                frames.append(f)
+    if len({frozenset(c) for c in cells.values()}) > 1:
+        problems.append("各非压力方案覆盖的（币种, 年份）不一致")
+    if len(cells) < 2:
+        problems.append(f"非压力方案只有 {sorted(cells)}：PBO 至少需要 2 个")
+    df = pd.concat(frames, ignore_index=True) if frames else None
+    return df, problems, {**m, "trial_variants": sorted(cells)}
+
+
+def matrix_trials(results_dir: str, current_fp: str | None, idea: str | None = None) -> dict:
+    """研究矩阵里的非压力方案（base、stop_floor、fill_exit……）：尝试次数、Sharpe 离散度、PBO（供上线判定）。
+    证据不完整（见 matrix_evidence）时 PBO 与离散度都不采用，尝试次数仍按计划的方案数计。"""
+    from fwresearch.stats import evaluate_trials
+
+    df, problems, m = matrix_evidence(results_dir, current_fp, idea)
+    planned = len(m.get("trial_variants") or [])
+    if problems or df is None:
+        return {"pbo": {"error": "矩阵证据不完整：" + "；".join(problems[:8]) + (f" 等 {len(problems)} 项" if len(problems) > 8 else "")
+                        if problems else "矩阵没有任何交易"},
+                "n_trials": planned, "trial_sharpe_std": None, "problems": problems}
+    t = evaluate_trials({v: g for v, g in df.groupby("variant") if v not in STRESS_VARIANTS}, _time_col(df))
+    t["n_trials"] = max(int(t.get("n_trials") or 0), planned)
+    if isinstance(t.get("pbo"), dict):
+        t["pbo"]["source"] = "研究矩阵（单币 × 单年任务合并后的月度 R，近似；不是同一账户的组合路径）"
+    return t
+
+
+def candidate_trials(manifest: dict, states: dict, holdout_start, data_start, data_end) -> dict:
+    """上线判定的候选方案证据（v2.10）：组合回测清单里的 trial_variants（base 与 stop_floor、fill_exit 等非压力方案），
+    每个都必须是同一实验、通过校验的成功运行；PBO 只用开发区间（样本外起点之前）。
+    v2.9 用研究矩阵（单币 × 单年合并）算 PBO，而且包含样本外段（外部审查 v2.9 P2-2）；矩阵现在只作诊断（lab matrix）。"""
+    from fwresearch.stats import portfolio_trials
+
+    names = list(manifest.get("trial_variants") or ["base"])
+    bad = [f"{n}：{(states.get(n) or {}).get('status', '没有运行')} {(states.get(n) or {}).get('error', '') or ''}".strip()
+           for n in names if (states.get(n) or {}).get("trades") is None]
+    if bad:
+        return {"pbo": {"error": "组合回测的候选方案不完整：" + "；".join(bad)}, "n_trials": len(names), "trial_sharpe_std": None,
+                "candidates": names}
+    if not holdout_start:
+        return {"pbo": {"error": "没有登记样本外段：无法划定开发区间，PBO 不计算"}, "n_trials": len(names),
+                "trial_sharpe_std": None, "candidates": names}
+    out = portfolio_trials({n: states[n]["trades"] for n in names}, data_start, data_end, dev_end=holdout_start)
+    return {**out, "candidates": names}
 
 
 def cmd_verdict(a) -> int:
@@ -233,21 +346,73 @@ def cmd_verdict(a) -> int:
                               else {"status": "error", "error": "逐笔文件缺少 exit_reason / notional / risk 列"})
     a.holdout_start = ""
     ho, registered = holdout_for(a)
-    n_trials = IdeaBook(a.ideas).n_trials() if Path(a.ideas).exists() else 1
+    if manifest.get("idea") != a.idea:                               # v2.9：组合回测必须属于这个想法
+        raise SystemExit(f"组合回测清单属于想法 {manifest.get('idea')!r}，不是 {a.idea}：用 research portfolio --all --idea {a.idea} 重跑")
+    book = IdeaBook(a.ideas)
+    it = book.get(a.idea)
+    binding = {}
+    if ho:
+        # 样本外登记必须早于：这个想法第一次被回测（研究脚本自动记入登记簿，v2.9），以及本次判定用到的每一次运行（v2.8）。
+        # 只比本次运行（v2.8）时，看完结果再登记、原样重跑一次就能通过（外部审查 v2.8 P1-1）。
+        # 与登记簿里的回测记录比较顺序时用**行号**（登记簿只追加，行号就是真实顺序；v2.12）：时间戳可能相同（时钟精度）或被调整。
+        reg_at = it.holdout_registered_at
+        used = [v.get("started_at") for k, v in states.items() if k in ["base", *required] and v.get("trades") is not None
+                and v.get("started_at")]
+        first_run = min(pd.Timestamp(x) for x in used) if used else None
+        binding = {"registered_at": reg_at, "first_run_started_at": str(first_run) if first_run is not None else None,
+                   "first_backtest_of_idea": it.first_backtest_at, "holdout_seq": it.holdout_seq,
+                   "first_backtest_seq": it.first_backtest_seq}
+        if not reg_at or first_run is None or pd.Timestamp(reg_at) >= first_run:
+            registered = False
+            binding["error"] = "样本外起点的登记时间不早于回测开始时间：不能证明是事先登记的"
+        elif it.first_backtest_seq is None:
+            registered = False
+            binding["error"] = "想法登记簿里没有这个想法的回测记录（不是用 research 脚本跑的）：无法核对登记顺序"
+        elif it.holdout_seq is None or it.holdout_seq > it.first_backtest_seq:
+            registered = False
+            binding["error"] = "样本外起点登记于这个想法第一次回测之后（看过结果再登记）：不算事先登记"
+    book_trials = book.n_trials()
+    this_idea = max(it.n_backtests, it.n_configs())
+    d0, d1 = timerange_bounds(manifest.get("timerange"))
+    mt = candidate_trials(manifest, states, ho, d0, d1)
+    n_trials = max(book_trials, 1, int(mt.get("n_trials") or 0) + book_trials - this_idea)
+    # Sharpe 离散度：有自动值（组合回测候选）时用自动值，手填值只有更大（更保守）时才采用。
+    # v2.12（外部审查 v2.11 P1）：候选证据不合格（有未知 R）时**忽略**手填值——手填不能替代缺失的证据；
+    # 只有候选完整但个数不够算离散度时，才允许只用手填值。
+    auto = mt.get("trial_sharpe_std")
+    cand_unknown = mt.get("risk_unknown") or {}
+    if cand_unknown:
+        std = None
+        std_src = ("已忽略手填值：" if a.trial_sharpe_std is not None else "") + f"候选有未知 R {cand_unknown}"
+    elif auto is not None:
+        std = max(auto, a.trial_sharpe_std) if a.trial_sharpe_std is not None else auto
+        std_src = "组合回测候选" if std == auto else "手填（大于自动值，更保守）"
+    else:
+        std, std_src = a.trial_sharpe_std, ("手填（候选完整但不足以计算离散度）" if a.trial_sharpe_std is not None else "无")
     res = final_verdict(base["trades"], states, required, holdout_start=ho, holdout_registered=registered,
-                        n_trials=max(n_trials, 1), trial_sharpe_std=a.trial_sharpe_std, time_col=_time_col(base["trades"]),
-                        risk_fraction=a.risk)
+                        n_trials=n_trials, trial_sharpe_std=std, time_col=_time_col(base["trades"]),
+                        risk_fraction=a.risk, pbo=mt.get("pbo"), data_start=d0, data_end=d1, candidate_risk_unknown=cand_unknown)
+    res["holdout_binding"] = binding
+    res["trials"] = {"idea_book": book_trials, "this_idea": this_idea, "candidates": mt.get("candidates"),
+                     "candidate_count": mt.get("n_trials"), "used": n_trials,
+                     "trial_sharpe_std": std, "trial_sharpe_std_source": std_src,
+                     "candidate_trials": {k: v for k, v in mt.items() if k != "pbo"}}
+    res["stress_waivers"] = manifest.get("stress_waivers") or {}
+    res["experiment"] = {k: manifest.get(k) for k in ("experiment_id", "strategy", "timerange", "pairs")}
     if base.get("data_gaps"):                                        # 研究数据有缺口（事件日历、资金费、日线）：不能判通过
         res["data_gaps"] = base["data_gaps"]
         if res["verdict"] == "通过":
             res.update(verdict="证据不足")
         res["missing"] = list(res["missing"]) + ["data_gaps"]
-    res.update(idea=a.idea, manifest={k: manifest.get(k) for k in ("required_stress", "fingerprint", "strategy", "stop_slip")},
+    res.update(idea=a.idea, manifest={k: manifest.get(k) for k in ("required_stress", "stress_waivers", "fingerprint", "strategy",
+                                                                    "stop_slip", "experiment_id", "timerange", "pairs", "idea")},
                runs={k: {kk: v.get(kk) for kk in ("status", "run_id", "error")} for k, v in states.items()},
                note="上线判定：只基于组合回测的逐笔记录和策略声明的全部必需压力方案（v2.7）")
     paths = _save(a.out_dir, f"verdict-{_stamp()}", res, report.verdict_md(res))
     print(json.dumps({"verdict": res["verdict"], "failed": res["failed"], "missing": res["missing"],
-                      "required_stress": required, **paths}, ensure_ascii=False, default=_json_default))
+                      "required_stress": required, "pbo": res["pbo"].get("pbo"), "n_trials": n_trials,
+                      "coverage": res["base"].get("coverage"), **paths},
+                     ensure_ascii=False, default=_json_default))
     return 0
 
 
@@ -430,6 +595,7 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--idea", required=True, help="想法 id（读取事先登记的样本外起点）")
     v.add_argument("--results", default="research/results/portfolio")
     v.add_argument("--current-fingerprint", default="", help="当前版本指纹；由模板的研究脚本传入，不一致的运行不采用")
+    v.add_argument("--matrix-results", default="research/results", help="研究矩阵结果目录（PBO 与尝试次数来自这里）")
     v.add_argument("--risk", type=float, default=0.005)
     v.add_argument("--trial-sharpe-std", type=float, default=None)
     v.add_argument("--ideas", default="research/ideas.jsonl")

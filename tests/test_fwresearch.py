@@ -24,7 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def trades(mean_r: float, n: int, seed: int = 1, sd: float = 1.0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     t = pd.date_range("2022-01-01", periods=n, freq="3D", tz="UTC")
-    return pd.DataFrame({"entry_time": t - pd.Timedelta(days=1), "time": t, "R": rng.normal(mean_r, sd, n)})
+    r = rng.normal(mean_r, sd, n)
+    return pd.DataFrame({"entry_time": t - pd.Timedelta(days=1), "time": t, "R": r, "pnl": r * 50.0})
 
 
 def panel(n: int = 400, assets=("BTC", "ETH", "SOL", "BNB"), seed: int = 0) -> dict:
@@ -685,13 +686,39 @@ def test_final_verdict_requires_every_declared_stress():
     """审查 v2.6 P1-3：缺 delay1 仍得到“通过”。必需方案由策略声明，缺一个就不能通过。"""
     base = trades(0.4, 300)
     ok = {"cost2x": {"status": "ok", "trades": trades(0.3, 300, seed=2)}}
-    r = stats.final_verdict(base, ok, ["cost2x", "delay1"], holdout_start="2023-06-01", holdout_registered=True)
+    pbo = {"pbo": 0.1}
+    r = stats.final_verdict(base, ok, ["cost2x", "delay1"], holdout_start="2023-06-01", holdout_registered=True, pbo=pbo)
     assert r["verdict"] == "证据不足" and "stress:delay1" in r["missing"]
     r2 = stats.final_verdict(base, {**ok, "delay1": {"status": "ok", "trades": trades(0.2, 280, seed=3)}},
-                             ["cost2x", "delay1"], holdout_start="2023-06-01", holdout_registered=True)
+                             ["cost2x", "delay1"], holdout_start="2023-06-01", holdout_registered=True, pbo=pbo)
     assert r2["verdict"] == "通过", r2
-    r3 = stats.final_verdict(base, ok, ["cost2x"], holdout_start="2023-06-01", holdout_registered=True)
+    r3 = stats.final_verdict(base, ok, ["cost2x"], holdout_start="2023-06-01", holdout_registered=True, pbo=pbo)
     assert r3["verdict"] == "通过"                                            # 策略只声明 cost2x 时只要求它
+
+
+def test_final_verdict_requires_pbo():
+    """审查 v2.7 P1-2：最终判定不看 PBO。算不出 PBO → 证据不足；PBO 过高 → 不通过。"""
+    base, ok = trades(0.4, 300), {"cost2x": {"status": "ok", "trades": trades(0.3, 300, seed=2)}}
+    kw = dict(holdout_start="2023-06-01", holdout_registered=True)
+    assert stats.final_verdict(base, ok, ["cost2x"], **kw)["missing"] == ["pbo"]
+    assert stats.final_verdict(base, ok, ["cost2x"], pbo={"note": "方案少于 2 个"}, **kw)["verdict"] == "证据不足"
+    bad = stats.final_verdict(base, ok, ["cost2x"], pbo={"pbo": 0.7}, **kw)
+    assert bad["verdict"] == "不通过" and bad["failed"] == ["pbo"]
+
+
+def test_holdout_must_lie_inside_the_backtest_range():
+    """审查 v2.7 P1-5：起点早于数据开始时比例 > 1，旧实现照样通过。"""
+    df = trades(0.5, 300, seed=0)                                             # 2022-01-01 起约 900 天
+    early = stats.holdout_check(df, "2021-06-01", True, "time", stats.DEFAULT_GATES)
+    assert early["pass"] is None and "不在回测区间" in early["error"]
+    late = stats.holdout_check(df, "2030-01-01", True, "time", stats.DEFAULT_GATES)
+    assert late["pass"] is None and "不在回测区间" in late["error"]
+    half = stats.holdout_check(df, "2022-04-01", True, "time", stats.DEFAULT_GATES)   # 样本外约 90%：样本内太短
+    assert half["pass"] is None and "样本内太短" in half["error"]
+    inside = stats.holdout_check(df, "2023-06-01", True, "time", stats.DEFAULT_GATES, "2022-01-01", "2024-07-01")
+    assert inside["pass"] is True and 0.2 <= inside["holdout_time_frac"] <= 0.5
+    rng = stats.holdout_check(df, "2023-06-01", True, "time", stats.DEFAULT_GATES, "2020-01-01", "2024-07-01")
+    assert rng["holdout_time_frac"] < 0.3                                     # 用回测区间而不是交易首尾计算比例
 
 
 def test_stop_slip_stress_is_post_hoc_and_needs_columns():
@@ -704,6 +731,43 @@ def test_stop_slip_stress_is_post_hoc_and_needs_columns():
 
 def test_verdict_cli_refuses_stale_or_failed_runs(tmp_path):
     """审查 v2.6 P1-4：组合回测失败后旧 CSV 仍可被统计使用。现在只读 latest.json 指向的成功运行，并核对指纹与哈希。"""
+
+
+    it, root, run, cli = verdict_fixture(tmp_path, ["cost2x"])
+    run("base", trades(0.4, 300))
+    run("cost2x", trades(0.3, 300, seed=2))
+    r = cli()
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["verdict"] == "通过", r.stdout
+    run("cost2x", trades(0.3, 300, seed=2), status="error")                  # 新一次运行失败：旧结果不能再用
+    assert json.loads(cli().stdout)["verdict"] == "证据不足"
+    run("cost2x", trades(0.3, 300, seed=2), fp="old")                         # 结果属于旧版本
+    assert json.loads(cli().stdout)["verdict"] == "证据不足"
+
+
+TS_LATER = "2099-01-01T00:00:00+00:00"                                       # 晚于测试里登记样本外的时间
+
+
+def matrix_fixture(tmp_path, fp="fp1", idea=None, variants=(("base", 0.4), ("stop_floor", 0.0)), coins=("BTC", "ETH")):
+    """研究矩阵：非压力方案（base 有优势、stop_floor 没有）× 2 个币，供上线判定计算 PBO 与尝试次数。"""
+    import hashlib
+
+    res = tmp_path / "results"
+    (res / "trades").mkdir(parents=True, exist_ok=True)
+    jobs = []
+    for coin in coins:
+        for v, mean in variants:
+            jid = f"{coin}-2022-{v}"
+            jobs.append(jid)
+            df = trades(mean, 150, seed=11 + 7 * coins.index(coin) + [x for x, _ in variants].index(v)).assign(variant=v, job=jid, coin=coin)
+            df.to_csv(res / "trades" / f"{jid}.csv", index=False)
+            (res / f"{jid}.json").write_text(json.dumps({"status": "ok", "fingerprint": fp, "csv_sha256":
+                                                         hashlib.sha256((res / "trades" / f"{jid}.csv").read_bytes()).hexdigest()}))
+    (tmp_path / "jobs.json").write_text(json.dumps({"jobs": jobs, "fingerprint": fp, "idea": idea}))
+    return res
+
+
+def verdict_fixture(tmp_path, required, timerange="20220101-20240701", exp="exp1"):
     import hashlib
 
     from fwresearch.ideas import IdeaBook
@@ -712,52 +776,299 @@ def test_verdict_cli_refuses_stale_or_failed_runs(tmp_path):
     book = IdeaBook(tmp_path / "ideas.jsonl")
     it = book.add("测试想法", "某因子预测收益", "资金拥挤", "样本外不显著", "human")
     book.set_holdout(it.id, "2023-06-01")
-    (root).mkdir()
-    (root / "manifest.json").write_text(json.dumps({"required_stress": ["cost2x"], "fingerprint": "fp1"}))
+    book.record_backtest(it.id, {"variant": "base", "trial_key": "k-base", "source": "portfolio"})     # 研究脚本自动记录
+    book.record_backtest(it.id, {"variant": "stop_floor", "trial_key": "k-floor", "source": "matrix"})
+    root.mkdir()
+    (root / "manifest.json").write_text(json.dumps({"required_stress": required, "fingerprint": "fp1", "idea": it.id,
+                                                    "experiment_id": exp, "timerange": timerange,
+                                                    "trial_variants": ["base", "stop_floor"]}))
 
-    def run(variant, df, status="ok", fp="fp1"):
+    def run(variant, df, status="ok", fp="fp1", **over):
         d = root / variant / "run-1"
         d.mkdir(parents=True, exist_ok=True)
         df.to_csv(d / "trades.csv", index=False)
-        meta = {"status": status, "run_id": "1", "fingerprint": fp, "csv": "run-1/trades.csv",
-                "csv_sha256": hashlib.sha256((d / "trades.csv").read_bytes()).hexdigest()}
-        (root / variant / "latest.json").write_text(json.dumps(meta))
+        meta = {"status": status, "run_id": "1", "fingerprint": fp, "csv": "run-1/trades.csv", "experiment_id": exp,
+                "timerange": timerange, "started_at": TS_LATER,
+                "csv_sha256": hashlib.sha256((d / "trades.csv").read_bytes()).hexdigest(), **over}
+        (root / variant / "latest.json").write_text(json.dumps({k: v for k, v in meta.items() if v is not None}))
 
-    run("base", trades(0.4, 300))
-    run("cost2x", trades(0.3, 300, seed=2))
+    run("stop_floor", trades(0.0, 300, seed=12))                             # 候选方案：组合回测（v2.10 的 PBO 来源）
+    mres = matrix_fixture(tmp_path, idea=it.id)
     env = {**os.environ, "PYTHONPATH": str(ROOT)}
     cli = lambda *a: subprocess.run([sys.executable, "-m", "fwresearch", "verdict", "--idea", it.id, "--results", str(root),  # noqa: E731
-                                     "--ideas", str(tmp_path / "ideas.jsonl"), "--out-dir", str(tmp_path / "lab"), *a],
+                                     "--ideas", str(tmp_path / "ideas.jsonl"), "--out-dir", str(tmp_path / "lab"),
+                                     "--matrix-results", str(mres), "--current-fingerprint", "fp1", *a],
                                     capture_output=True, text=True, env=env, timeout=300)
-    r = cli("--current-fingerprint", "fp1")
-    assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout)["verdict"] == "通过"
-    run("cost2x", trades(0.3, 300, seed=2), status="error")                  # 新一次运行失败：旧结果不能再用
-    assert json.loads(cli("--current-fingerprint", "fp1").stdout)["verdict"] == "证据不足"
-    run("cost2x", trades(0.3, 300, seed=2), fp="old")                         # 结果属于旧版本
-    assert json.loads(cli("--current-fingerprint", "fp1").stdout)["verdict"] == "证据不足"
+    return it, root, run, cli
+
+
+@pytest.mark.parametrize("over,state", [
+    ({"timerange": "20230101-20240701"}, "other_timerange"),                  # 另一个时间段的运行
+    ({"experiment_id": "exp-other"}, "other_experiment"),                     # 另一个实验（策略、交易对……）
+    ({"csv_sha256": None}, "missing_hash"),                                   # 缺哈希：v2.7 跳过校验
+    ({"started_at": None}, "no_start_time"),
+])
+def test_verdict_rejects_runs_from_another_experiment(tmp_path, over, state):
+    """审查 v2.7 P1-3：不同时间段的运行、缺哈希的运行被接受。"""
+    it, root, run, cli = verdict_fixture(tmp_path, ["cost2x"])
+    run("base", trades(0.4, 300))
+    run("cost2x", trades(0.3, 300, seed=2), **over)
+    out = json.loads(cli().stdout)
+    assert out["verdict"] == "证据不足" and "stress:cost2x" in out["missing"]
+    lab = json.loads(next((tmp_path / "lab").glob("verdict-*.json")).read_text("utf-8"))
+    assert lab["runs"]["cost2x"]["status"] == state
+
+
+def test_verdict_refuses_stale_or_legacy_manifest(tmp_path):
+    it, root, run, cli = verdict_fixture(tmp_path, ["cost2x"])
+    run("base", trades(0.4, 300))
+    run("cost2x", trades(0.3, 300, seed=2))
+    r = cli("--current-fingerprint", "fp2")                                   # 清单属于旧版本：v2.7 只警告
+    assert r.returncode != 0 and "旧版本" in (r.stderr + r.stdout)
+    (root / "manifest.json").write_text(json.dumps({"required_stress": ["cost2x"], "fingerprint": "fp1"}))
+    r = cli()
+    assert r.returncode != 0 and "实验标识" in (r.stderr + r.stdout)
+
+
+def test_verdict_holdout_registered_after_the_runs_does_not_count(tmp_path):
+    """审查 v2.7 P1-5：样本外登记没有和运行绑定。登记晚于回测开始 → 不算事先登记。"""
+    it, root, run, cli = verdict_fixture(tmp_path, [])
+    run("base", trades(0.4, 300), started_at="2020-01-01T00:00:00+00:00")
+    out = json.loads(cli().stdout)
+    assert out["verdict"] == "证据不足"
+    lab = json.loads(next((tmp_path / "lab").glob("verdict-*.json")).read_text("utf-8"))
+    assert "登记时间不早于回测" in lab["holdout_binding"]["error"]
+    assert lab["base"]["checks"]["holdout"]["pass"] is None
+
+
+def test_verdict_pbo_comes_from_portfolio_candidates_on_the_dev_range(tmp_path):
+    """审查 v2.9 P2-2：PBO 用矩阵（单币 × 单年）且包含样本外段。现在用组合回测的候选方案，只用开发区间。"""
+    it, root, run, cli = verdict_fixture(tmp_path, [])
+    run("base", trades(0.4, 300))
+    out = json.loads(cli().stdout)
+    assert out["verdict"] == "通过" and out["pbo"] is not None and out["n_trials"] >= 2, out
+    lab = json.loads(sorted((tmp_path / "lab").glob("verdict-*.json"))[-1].read_text("utf-8"))
+    assert "组合回测" in lab["pbo"]["source"] and lab["trials"]["candidates"] == ["base", "stop_floor"]
+    dev = lab["trials"]["candidate_trials"]["trials"]["base"]["n_trades_dev"]
+    assert dev < 300 and lab["trials"]["candidate_trials"]["dev_range"][1].startswith("2023-06-01")   # 样本外段不参与
+    (tmp_path / "jobs.json").write_text(json.dumps({"jobs": [], "fingerprint": "fp-old"}))   # 矩阵无关紧要了
+    assert json.loads(cli().stdout)["verdict"] == "通过"
+    run("stop_floor", trades(0.0, 300, seed=12), status="error")             # 候选失败 → PBO 无法判定
+    out = json.loads(cli().stdout)
+    assert out["verdict"] == "证据不足" and "pbo" in out["missing"]
+
+
+def test_portfolio_pbo_ignores_the_holdout_segment():
+    """开发区间内两个候选一样差、样本外段 base 很好：PBO 不能被样本外段影响。"""
+    base, alt = trades(0.0, 300, seed=1), trades(0.0, 300, seed=2)
+    late = base["entry_time"] >= pd.Timestamp("2023-06-01", tz="UTC")
+    base.loc[late, "R"] = 5.0
+    base["pnl"], alt["pnl"] = base["R"] * 50, alt["R"] * 50
+    full = stats.portfolio_trials({"base": base, "alt": alt}, "2022-01-01", "2024-07-01")
+    dev = stats.portfolio_trials({"base": base, "alt": alt}, "2022-01-01", "2024-07-01", dev_end="2023-06-01")
+    assert dev["trials"]["base"]["pnl_dev"] < full["trials"]["base"]["pnl_dev"] / 3
+    assert dev["pbo"]["n_observations"] < full["pbo"]["n_observations"]
 
 
 def test_verdict_with_data_gaps_is_never_a_pass(tmp_path):
-    import hashlib
+
+
+    it, root, run, cli = verdict_fixture(tmp_path, [])
+    run("base", trades(0.4, 300), data_gaps=["没有历史事件文件"])
+    out = json.loads(cli().stdout)
+    assert out["verdict"] == "证据不足" and "data_gaps" in out["missing"]
+
+
+# ------------------------------------------------------------------ v2.9：外部审查 v2.8
+def test_rerun_after_looking_cannot_make_holdout_registered(tmp_path):
+    """审查 v2.8 P1-1：先回测、看结果，再登记样本外，原样重跑一次组合回测，v2.8 判为“事先登记”。"""
+    import time as _t
 
     from fwresearch.ideas import IdeaBook
 
+    book = IdeaBook(tmp_path / "ideas.jsonl")
+    it = book.add("测试想法", "某因子预测收益", "资金拥挤", "样本外不显著", "human")
+    book.record_backtest(it.id, {"variant": "base", "trial_key": "k1", "source": "portfolio"})   # ① 研究脚本跑过一次
+    with pytest.raises(ValueError, match="回测之前"):                                             # ② 看完结果想登记：拒绝
+        book.set_holdout(it.id, "2023-06-01")
+    # 绕过 API（手改登记簿，或旧版本留下的记录）：登记写在第一次回测之后
+    with open(tmp_path / "ideas.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": "holdout", "id": it.id, "at": pd.Timestamp.now(tz="UTC").isoformat(),
+                             "start": "2023-06-01", "by": "agent"}) + "\n")
+    _t.sleep(0.01)
     root = tmp_path / "portfolio"
+    (root / "base" / "run-1").mkdir(parents=True)
+    trades(0.4, 300).to_csv(root / "base" / "run-1" / "trades.csv", index=False)
+    import hashlib
+    (root / "manifest.json").write_text(json.dumps({"required_stress": [], "fingerprint": "fp1", "idea": it.id,
+                                                    "experiment_id": "e", "timerange": "20220101-20240701"}))
+    (root / "base" / "latest.json").write_text(json.dumps({                                     # ③ 原样重跑：开始时间晚于登记
+        "status": "ok", "run_id": "1", "fingerprint": "fp1", "csv": "run-1/trades.csv", "experiment_id": "e",
+        "timerange": "20220101-20240701", "started_at": "2099-01-01T00:00:00+00:00",
+        "csv_sha256": hashlib.sha256((root / "base" / "run-1" / "trades.csv").read_bytes()).hexdigest()}))
+    mres = matrix_fixture(tmp_path, idea=it.id)
+    r = subprocess.run([sys.executable, "-m", "fwresearch", "verdict", "--idea", it.id, "--results", str(root),
+                        "--ideas", str(tmp_path / "ideas.jsonl"), "--out-dir", str(tmp_path / "lab"),
+                        "--matrix-results", str(mres), "--current-fingerprint", "fp1"],
+                       capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(ROOT)}, timeout=300)
+    assert json.loads(r.stdout)["verdict"] == "证据不足", r.stderr                                  # ④ 仍不算事先登记
+    lab = json.loads(next((tmp_path / "lab").glob("verdict-*.json")).read_text("utf-8"))
+    assert "第一次回测之后" in lab["holdout_binding"]["error"] and lab["base"]["checks"]["holdout"]["pass"] is None
+
+
+def test_verdict_refuses_portfolio_of_another_idea(tmp_path):
+    it, root, run, cli = verdict_fixture(tmp_path, [])
+    run("base", trades(0.4, 300))
+    m = json.loads((root / "manifest.json").read_text())
+    (root / "manifest.json").write_text(json.dumps({**m, "idea": "I-20990101-001"}))
+    r = cli()
+    assert r.returncode != 0 and "不是" in r.stderr
+
+
+def test_rerun_with_same_parameters_is_not_a_new_trial(tmp_path):
+    from fwresearch.ideas import IdeaBook
+
+    book = IdeaBook(tmp_path / "ideas.jsonl")
+    it = book.add("测试想法", "某因子预测收益", "资金拥挤", "样本外不显著", "human")
+    for key, stress in (("k1", False), ("k1", False), ("k2", False), ("k3", True)):
+        book.record_backtest(it.id, {"trial_key": key, "stress": stress})
+    assert book.get(it.id).n_configs() == 2 and book.n_trials() == 2                              # 重跑与压力方案不计
+
+
+@pytest.mark.parametrize("damage,needle", [
+    ("fail", "状态 error"),                     # 一格失败：v2.8 静默跳过，剩下的照样算 PBO
+    ("nohash", "缺逐笔文件哈希"),
+    ("tamper", "哈希不一致"),
+    ("missing", "没有结果"),
+    ("coverage", "覆盖"),
+])
+def test_matrix_evidence_must_be_complete_for_pbo(tmp_path, damage, needle):
+    """审查 v2.8 P1-2：PBO 的矩阵证据没有完整性与 CSV 校验。"""
+    from fwresearch.__main__ import matrix_trials
+
+    res = matrix_fixture(tmp_path, idea="I-1")
+    assert matrix_trials(str(res), "fp1", "I-1")["pbo"].get("pbo") is not None
+    j = res / "ETH-2022-stop_floor.json"
+    meta = json.loads(j.read_text())
+    if damage == "fail":
+        j.write_text(json.dumps({**meta, "status": "error"}))
+    elif damage == "nohash":
+        j.write_text(json.dumps({k: v for k, v in meta.items() if k != "csv_sha256"}))
+    elif damage == "tamper":
+        f = res / "trades" / "ETH-2022-stop_floor.csv"
+        f.write_text(f.read_text().replace("2022-", "2022-", 1) + "\n")
+    elif damage == "missing":
+        j.unlink()
+    else:
+        m = json.loads((tmp_path / "jobs.json").read_text())
+        m["jobs"].remove("ETH-2022-stop_floor")
+        (tmp_path / "jobs.json").write_text(json.dumps(m))
+    out = matrix_trials(str(res), "fp1", "I-1")
+    assert out["pbo"].get("pbo") is None and needle in out["pbo"]["error"], out["pbo"]
+    assert out["n_trials"] == 2 and out["trial_sharpe_std"] is None
+
+
+def test_matrix_of_another_idea_or_version_is_not_used(tmp_path):
+    from fwresearch.__main__ import matrix_trials
+
+    res = matrix_fixture(tmp_path, idea="I-1")
+    assert "不是 I-2" in matrix_trials(str(res), "fp1", "I-2")["pbo"]["error"]
+    assert "旧版本" in matrix_trials(str(res), "fp2", "I-1")["pbo"]["error"]
+
+
+def test_manual_trial_sharpe_std_cannot_be_smaller_than_the_matrix(tmp_path):
+    """审查 v2.8 P2-3：手填 --trial-sharpe-std 优先于自动值，填一个更小的值就能降低 DSR 门槛。"""
+    it, root, run, cli = verdict_fixture(tmp_path, [])
+    run("base", trades(0.4, 300))
+    cli("--trial-sharpe-std", "0.000001")
+    lab = json.loads(next((tmp_path / "lab").glob("verdict-*.json")).read_text("utf-8"))
+    auto = lab["trials"]["trial_sharpe_std"]
+    assert auto > 0.000001 and lab["trials"]["trial_sharpe_std_source"] == "组合回测候选"
+
+
+def test_stop_slip_covers_framework_stop_exits():
+    """审查 v2.9 P1-2：fw_stop_crossed / fw_invalid_stop 是市价止损离场，stopslip 却不扣滑点。"""
+    df = pd.DataFrame({"R": [-2.0, -1.0, 1.0], "exit_reason": ["fw_stop_crossed", "fw_invalid_stop:risk_over_budget", "roi"],
+                       "notional": [100.0, 100.0, 100.0], "risk": [1.0, 1.0, 1.0]})
+    out = stats.stop_slip_trades(df, 0.002)
+    assert out["R"].round(6).tolist() == [-2.2, -1.2, 1.0]
+
+
+# ------------------------------------------------------------------ v2.11：外部审查 v2.10
+def test_unknown_risk_losses_cannot_be_dropped_silently(tmp_path):
+    """审查 v2.10 P0：R 未知的亏损被 _clean 删掉，基准与压力方案只用剩下的交易，判定仍“通过”。"""
+    it, root, run, cli = verdict_fixture(tmp_path, ["cost2x", "stopslip"])
+    base = trades(0.4, 300)
+    base["exit_reason"], base["notional"], base["risk"] = "roi", 5000.0, 50.0
+    run("base", base)
+    run("cost2x", trades(0.3, 300, seed=2))
+    assert json.loads(cli().stdout)["verdict"] == "通过"                     # 基线
+    bad = pd.concat([base, pd.DataFrame([{"entry_time": base["entry_time"].iloc[100], "time": base["time"].iloc[100],
+                                           "R": np.nan, "pnl": -500.0, "exit_reason": "fw_stop_crossed",
+                                           "notional": 5000.0, "risk": np.nan}])], ignore_index=True)
+    run("base", bad)                                                          # 只加 1 笔风险未知的亏损
+    out = json.loads(cli().stdout)
+    assert out["verdict"] == "证据不足" and "base" in out["missing"] and "stress:stopslip" in out["missing"], out
+    assert out["coverage"]["n_r_unknown"] == 1 and out["coverage"]["unknown_pnl"] == -500.0
+    lab = json.loads(sorted((tmp_path / "lab").glob("verdict-*.json"))[-1].read_text("utf-8"))
+    assert lab["base"]["checks"]["risk_known"]["pass"] is None and lab["stress"]["stopslip"]["state"] == "risk_unknown"
+    md = sorted((tmp_path / "lab").glob("verdict-*.md"))[-1].read_text("utf-8")
+    assert "R 未知 1 笔" in md
+    c2 = trades(0.3, 300, seed=2)
+    c2.loc[5, "R"] = np.nan
+    assert stats.stress_check("cost2x", {"status": "ok", "trades": c2}, 300)["pass"] is None
+
+
+@pytest.mark.parametrize("weekday", range(7))
+def test_pbo_weekly_grid_keeps_every_trade(weekday):
+    """审查 v2.10 P1-1：区间从周六开始时，第一个周一之前的交易落不进任何一格。分箱前后盈亏必须守恒。"""
+    start = pd.Timestamp("2022-01-03", tz="UTC") + pd.Timedelta(days=weekday)       # 周一起，逐日偏移
+    t = pd.date_range(start + pd.Timedelta(hours=1), periods=150, freq="3D")
+    rng = np.random.default_rng(weekday)
+    a = pd.DataFrame({"entry_time": t - pd.Timedelta(minutes=30), "time": t, "R": rng.normal(0.3, 1, 150)})
+    a["pnl"] = a["R"] * 50
+    a.loc[0, "pnl"] = -100.0                                                       # 第一笔：第一个周一之前（除周一起始外）
+    b = a.assign(pnl=rng.normal(0, 50, 150))
+    out = stats.portfolio_trials({"a": a, "b": b}, start, start + pd.Timedelta(days=460))
+    assert out["pbo"].get("pbo") is not None, out["pbo"]
+    assert out["trials"]["a"]["pnl_dev"] == round(float(a["pnl"].sum()), 4)
+
+
+def test_candidate_with_unknown_risk_has_no_trial_std():
+    a, b = trades(0.3, 300, seed=1), trades(0.0, 300, seed=2)
+    b.loc[3, "R"] = np.nan
+    out = stats.portfolio_trials({"a": a, "b": b}, "2022-01-01", "2024-07-01", dev_end="2023-06-01")
+    assert out["trial_sharpe_std"] is None and out["risk_unknown"] == {"b": 1}
+
+
+
+def test_manual_trial_std_cannot_replace_candidate_risk_evidence(tmp_path):
+    """审查 v2.11 P1：候选有未知 R 时自动离散度不计算，但手填 --trial-sharpe-std 0.01 就让判定“通过”。"""
+    it, root, run, cli = verdict_fixture(tmp_path, [])
+    run("base", trades(0.4, 300))
+    assert json.loads(cli().stdout)["verdict"] == "通过"                     # 基线：候选完整
+    sf = trades(0.0, 300, seed=12)
+    sf.loc[10, "R"] = np.nan                                                 # 开发区间内 1 笔未知 R
+    run("stop_floor", sf)
+    for extra in ([], ["--trial-sharpe-std", "0.01"], ["--trial-sharpe-std", "1.0"]):
+        out = json.loads(cli(*extra).stdout)
+        assert out["verdict"] == "证据不足" and "candidates_risk_known" in out["missing"], (extra, out)
+    lab = json.loads(sorted((tmp_path / "lab").glob("verdict-*.json"))[-1].read_text("utf-8"))
+    assert lab["trials"]["trial_sharpe_std"] is None and "已忽略手填值" in lab["trials"]["trial_sharpe_std_source"]
+
+
+def test_holdout_order_uses_registry_sequence_not_timestamps(tmp_path):
+    """审查 v2.11 P2-3：登记与第一次回测时间戳相同（Windows 时钟精度）时被误判。顺序改用登记簿行号。"""
+    from fwresearch.ideas import IdeaBook
+
     book = IdeaBook(tmp_path / "ideas.jsonl")
     it = book.add("测试想法", "某因子预测收益", "资金拥挤", "样本外不显著", "human")
     book.set_holdout(it.id, "2023-06-01")
-    root.mkdir()
-    (root / "manifest.json").write_text(json.dumps({"required_stress": [], "fingerprint": "fp1"}))
-    d = root / "base" / "run-1"
-    d.mkdir(parents=True)
-    trades(0.4, 300).to_csv(d / "trades.csv", index=False)
-    (root / "base" / "latest.json").write_text(json.dumps({
-        "status": "ok", "run_id": "1", "fingerprint": "fp1", "csv": "run-1/trades.csv",
-        "csv_sha256": hashlib.sha256((d / "trades.csv").read_bytes()).hexdigest(), "data_gaps": ["没有历史事件文件"]}))
-    r = subprocess.run([sys.executable, "-m", "fwresearch", "verdict", "--idea", it.id, "--results", str(root),
-                        "--ideas", str(tmp_path / "ideas.jsonl"), "--out-dir", str(tmp_path / "lab"),
-                        "--current-fingerprint", "fp1"], capture_output=True, text=True,
-                       env={**os.environ, "PYTHONPATH": str(ROOT)}, timeout=300)
-    out = json.loads(r.stdout)
-    assert out["verdict"] == "证据不足" and "data_gaps" in out["missing"]
+    book.record_backtest(it.id, {"variant": "base", "trial_key": "k"})
+    lines = (tmp_path / "ideas.jsonl").read_text("utf-8").splitlines()
+    same = '"2026-01-01T00:00:00+00:00"'
+    import re
+    lines = [re.sub(r'"at": "[^"]+"', f'"at": {same}', x) for x in lines]    # 所有事件时间戳相同
+    (tmp_path / "ideas.jsonl").write_text("\n".join(lines) + "\n", "utf-8")
+    got = IdeaBook(tmp_path / "ideas.jsonl").get(it.id)
+    assert got.holdout_seq < got.first_backtest_seq                          # 按行号：登记在先

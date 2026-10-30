@@ -47,6 +47,21 @@ class Idea:
     n_backtests: int = 0
     holdout_start: str | None = None          # 样本外段起点（UTC 日期），只能在进入 backtesting 之前登记一次
     holdout_registered_at: str | None = None
+    backtests: list = field(default_factory=list)   # 研究脚本每次回测自动追加（v2.9）：时间、来源、方案、参数组合标识
+    holdout_seq: int | None = None                  # 登记事件在登记簿里的行号（v2.12：比较先后用行号，不用时间戳）
+
+    @property
+    def first_backtest_seq(self) -> int | None:
+        return min((b["seq"] for b in self.backtests if b.get("seq") is not None), default=None)
+
+    @property
+    def first_backtest_at(self) -> str | None:
+        """这个想法第一次被回测的时间（研究脚本自动记录）。样本外起点必须在它之前登记。"""
+        return min((b["at"] for b in self.backtests), default=None)
+
+    def n_configs(self) -> int:
+        """回测过的不同参数组合数（不含压力方案、不含原样重跑）：DSR 尝试次数的依据之一。"""
+        return len({b.get("trial_key") for b in self.backtests if b.get("trial_key") and not b.get("stress")})
 
 
 class IdeaBook:
@@ -66,7 +81,7 @@ class IdeaBook:
 
     def all(self) -> dict[str, Idea]:
         ideas: dict[str, Idea] = {}
-        for ev in self._events():
+        for seq, ev in enumerate(self._events()):
             k = ev["kind"]
             if k == "create":
                 ideas[ev["id"]] = Idea(**ev["idea"])
@@ -79,7 +94,9 @@ class IdeaBook:
                 elif k == "evidence":
                     it.evidence.append(ev["evidence"])
                 elif k == "holdout":
-                    it.holdout_start, it.holdout_registered_at = ev["start"], ev["at"]
+                    it.holdout_start, it.holdout_registered_at, it.holdout_seq = ev["start"], ev["at"], seq
+                elif k == "backtest":
+                    it.backtests.append({**{k2: v for k2, v in ev.items() if k2 not in ("kind", "id")}, "seq": seq})
                 it.history.append({k2: ev[k2] for k2 in ev if k2 not in ("idea",)})
         return ideas
 
@@ -131,8 +148,9 @@ class IdeaBook:
         it = self.get(iid)
         if it.holdout_start:
             raise ValueError(f"{iid} 已登记样本外起点 {it.holdout_start}（{it.holdout_registered_at}），不能修改")
-        if it.status not in ("proposed", "screening") or it.n_backtests:
-            raise ValueError(f"{iid} 已经开始回测（状态 {it.status}）：样本外起点必须在回测之前登记")
+        if it.status not in ("proposed", "screening") or it.n_backtests or it.backtests:
+            raise ValueError(f"{iid} 已经开始回测（状态 {it.status}，研究脚本记录 {len(it.backtests)} 次回测）："
+                             "样本外起点必须在回测之前登记")
         ts = pd.Timestamp(start)
         ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
         self._append({"kind": "holdout", "id": iid, "at": pd.Timestamp.now(tz="UTC").isoformat(),
@@ -150,9 +168,15 @@ class IdeaBook:
         self._append({"kind": "evidence", "id": iid, "at": ev["at"], "evidence": ev})
         return self.get(iid)
 
+    def record_backtest(self, iid: str, info: dict) -> None:
+        """研究脚本每次开始回测时调用（只追加，不修改）。info：source（matrix / portfolio）、variant、trial_key、stress、run_id 等。
+        v2.8 的研究脚本不写登记簿：看完结果再登记样本外、原样重跑一次，判定就认为是“事先登记”（外部审查 v2.8 P1-1）。"""
+        self.get(iid)
+        self._append({"kind": "backtest", "id": iid, "at": pd.Timestamp.now(tz="UTC").isoformat(), **info})
+
     def n_trials(self) -> int:
-        """回测过的想法总次数（同一想法每进入一次 backtesting 记一次）：DSR 的尝试次数下限。"""
-        return sum(i.n_backtests for i in self.all().values())
+        """尝试次数：每个想法取“进入 backtesting 的次数”与“回测过的不同参数组合数”中较大者，再对全部想法求和。DSR 的尝试次数下限。"""
+        return sum(max(i.n_backtests, i.n_configs()) for i in self.all().values())
 
     def table(self) -> pd.DataFrame:
         rows = [{"id": i.id, "status": i.status, "title": i.title, "source": i.source.get("kind"),

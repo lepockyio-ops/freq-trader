@@ -57,14 +57,14 @@ class FakeTrade:
         self.cd[k] = v
 
 
-def strat(params=None, open_trades=(), signal_rows=None):
+def strat(params=None, open_trades=(), signal_rows=None, closed_trades=()):
     s = S.__new__(S)
     s.framework_params = {"event_file_required": False, **(params or {})}
     df = pd.DataFrame(signal_rows or [])
     s.dp = SimpleNamespace(get_analyzed_dataframe=lambda p, tf: (df, None), get_pair_dataframe=lambda p, tf: pd.DataFrame(),
                            runmode=SimpleNamespace(value="dry_run"))
     s.wallets = SimpleNamespace(get_total_stake_amount=lambda: EQUITY)
-    F.Trade.get_trades_proxy = staticmethod(lambda is_open=True: list(open_trades))
+    F.Trade.get_trades_proxy = staticmethod(lambda is_open=True, **kw: list(open_trades) if is_open else list(closed_trades))
     F.FrameworkStrategy._events_cache = (None, None)
     return s
 
@@ -317,7 +317,7 @@ def test_real_freqtrade_shapes():
     (lambda: real_trade("filled", enter_tag=tag(99.0), stop_px=99.0), 10.0),
     (lambda: real_trade("pending", enter_tag=tag(99.0)), 10.0),               # v2.6 按 0 计算
     (lambda: real_trade("partial", enter_tag=tag(99.0)), 10.0),               # 已成交 + 剩余，按下单数量算一次
-    (lambda: real_trade("pending", enter_tag=tag(95.0), qty=40.0), 200.0),
+    (lambda: real_trade("pending", enter_tag=tag(97.5), qty=40.0), 100.0),
 ])
 def test_open_risk_uses_requested_amount_for_orders_in_flight(trade, risk):
     s = strat()
@@ -328,6 +328,7 @@ def test_open_risk_uses_requested_amount_for_orders_in_flight(trade, risk):
     lambda: real_trade("filled", enter_tag="manual"),                         # 已成交但没有止损 / 计划
     lambda: real_trade("pending", enter_tag=None),                            # 挂单没有计划
     lambda: real_trade("pending", enter_tag=tag(99.0), invalid="stop_not_below_fill"),
+    lambda: real_trade("pending", enter_tag=tag(95.0)),                       # 计划止损按下单价已不合规（超过上限）
 ])
 def test_open_risk_unknown_blocks_new_entries(trade):
     s = strat(open_trades=[trade()])
@@ -411,3 +412,164 @@ def test_better_fill_policy(policy, expect):
         assert s.custom_exit(t.pair, t, NOW, 99.5, 0.0) == "fw_invalid_stop:stop_too_close_after_fill"
     else:
         assert sp == 99.0 and t.get_custom_data("stop_kept_below_min")
+
+
+# ------------------------------------------------------------------ v2.8：外部审查 v2.7
+def test_floor_mode_pending_risk_matches_sizing():
+    """审查 v2.7 P1-1：floor 模式下定仓按抬到下限的止损，挂单风险却按原始计划止损算（少算）。"""
+    s = strat({"stop_min_mode": "floor"})
+    amount, _ = sized_amount(s, 100.0, 99.5)                                 # 计划止损 0.5%，floor → 0.8%
+    t = real_trade("pending", qty=amount, enter_tag=tag(99.5))
+    assert abs(s._open_risk([t]) - amount * 0.8) < 1e-9                       # v2.7：amount × 0.5
+    assert abs(s._open_risk([t]) - EQUITY * 0.005 * 0.008 / (0.008 + 0.0016 + 0.0016)) < 1e-6
+    f = real_trade("filled", qty=amount, enter_tag=tag(99.5))                 # 按下单价成交：止损就是下单时的 99.2
+    for policy in ("widen", "exit", "keep"):
+        s2 = strat({"stop_min_mode": "floor", "better_fill_policy": policy})
+        f2 = real_trade("filled", qty=amount, enter_tag=tag(99.5))
+        sp = s2._bind_stop(f2)                                                # floor 不会被当成“成交价更优”而离场
+        assert sp is not None and abs(sp - 100 * (1 - 0.0082)) < 1e-9 and not f2.get_custom_data("fw_invalid"), policy
+    assert f.get_custom_data("stop_px") is None
+
+
+def test_partial_fill_that_cannot_be_cancelled_blocks_entries_and_alerts(caplog):
+    """审查 v2.7 P0：freqtrade 拒绝撤单（碎仓）或撤单未确认时，部分成交的单子一直挂着，已成交部分没有止损。"""
+    q = real_trade("partial", enter_tag=tag(99.0), pair="SOL/USDT:USDT")
+    s = strat(open_trades=[q])
+    assert s.confirm_trade_entry("BTC/USDT:USDT", "limit", 1, 100.0, "GTC", NOW, tag(99.0), "long") is False
+    with caplog.at_level(logging.ERROR):
+        assert s.check_entry_timeout(q.pair, q, q.orders[0], NOW) is True
+        assert s._watch_partial_entries(NOW, [q]) == []
+        assert s._watch_partial_entries(NOW + timedelta(seconds=61), [q]) == [q]
+        assert s._watch_partial_entries(NOW + timedelta(seconds=90), [q]) == [q]
+    errs = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errs) == 1 and "没有止损" in errs[0].getMessage()               # 告警一次
+    assert q.get_custom_data("entry_stuck_since") and q.get_custom_data("partial_since")
+    o = q.orders[0]
+    o.ft_is_open, o.status, q.amount = False, "canceled", o.filled            # 人工或交易所撤掉后恢复
+    assert not s._partial_entry_open(q)
+    s._watch_partial_entries(NOW + timedelta(seconds=120), [q])
+    assert q.get_custom_data("partial_resolved_at")
+
+
+def test_partial_fill_alert_survives_the_unfilled_timeout_branch(caplog):
+    """审查 v2.8 P1-1：订单超过 unfilledtimeout（3 分钟）后 freqtrade 直接按超时处理、不再调用 check_entry_timeout。
+    用 freqtrade 自己的 ft_check_timed_out 走调度，再按 freqtrade 每轮调用 bot_loop_start。"""
+    q = real_trade("partial", enter_tag=tag(99.0), pair="SOL/USDT:USDT")
+    q.orders[0].order_date = NOW                                              # 下单时间
+    s = strat(open_trades=[q])
+    s.config = {"unfilledtimeout": {"entry": 3, "exit": 10, "unit": "minutes"}}
+    called = []
+    orig = s.check_entry_timeout
+    s.check_entry_timeout = lambda *a, **k: called.append(1) or orig(*a, **k)
+    t150 = NOW + timedelta(seconds=150)                                        # 150 秒时部分成交、撤单被拒
+    assert s.ft_check_timed_out(q, q.orders[0], t150) is True and called
+    s.bot_loop_start(t150)
+    called.clear()
+    t240 = NOW + timedelta(seconds=240)                                        # 超过 3 分钟：回调被跳过
+    with caplog.at_level(logging.ERROR):
+        assert s.ft_check_timed_out(q, q.orders[0], t240) is True and not called
+        s.bot_loop_start(t240)                                                 # 独立监测仍然告警
+    assert [r for r in caplog.records if "没有止损" in r.getMessage()]
+    assert q.get_custom_data("entry_stuck_since")
+
+
+@pytest.mark.parametrize("engine_stop,rate,expect", [
+    (90.1, 98.0, "fw_stop_crossed"),              # 审查 v2.8 P0：首次设置时价格已跌破，引擎还停在兜底价
+    (90.1, 99.0, "fw_stop_crossed"),              # 正好到止损
+    (99.0, 98.0, None),                           # 引擎已采用止损：交给引擎 / 交易所端止损
+    (98.96, 98.0, None),                          # 按价格精度取整后的止损也算已采用
+    (90.1, 99.5, None),                           # 还没到止损
+])
+def test_stop_crossed_before_the_engine_adopts_it_exits(engine_stop, rate, expect):
+    s = strat()
+    amount, _ = sized_amount(s, 100.0, 99.0)
+    t = real_trade("filled", qty=amount, enter_tag=tag(99.0))
+    t.adjust_stop_loss(t.open_rate, -0.99, initial=True)
+    assert abs(t.stop_loss - 90.1) < 1e-9                                      # 10 倍杠杆的兜底止损
+    t.stop_loss = engine_stop
+    assert s._bind_stop(t) == 99.0
+    if rate <= 99.0:
+        assert s.custom_stoploss(t.pair, t, NOW, rate, -0.02, False) is None  # 不再返回会被忽略的 0
+    assert s.custom_exit(t.pair, t, NOW, rate, -0.02) == expect
+    if expect:
+        assert t.get_custom_data("stop_crossed_at")
+        assert s.custom_exit(t.pair, t, NOW + timedelta(seconds=5), rate, -0.02) == expect   # 离场失败：下一轮重试
+
+
+def test_stop_crossed_after_restart_rebinds_and_exits():
+    """重启后第一次检查：止损从 enter_tag 重新绑定，若价格已穿过止损立即离场。"""
+    s = strat()
+    amount, _ = sized_amount(s, 100.0, 99.0)
+    t = real_trade("filled", qty=amount, enter_tag=tag(99.0))
+    t.adjust_stop_loss(t.open_rate, -0.99, initial=True)
+    fresh = strat()
+    assert fresh.custom_exit(t.pair, t, NOW, 97.0, -0.03) == "fw_stop_crossed" and t.get_custom_data("stop_px") == 99.0
+
+
+def test_research_overrides_beat_framework_params_only_in_backtest(monkeypatch):
+    """审查 v2.7 P2：策略的 framework_params 覆盖了研究方案的环境变量，方案实际没跑。"""
+    monkeypatch.setenv("S03_RESEARCH_OVERRIDES", json.dumps({"stop_min_mode": "floor"}))
+    s = strat({"stop_min_mode": "skip"})
+    assert s.fw["stop_min_mode"] == "skip"                                    # dry-run / 实盘：忽略
+    s.dp.runmode = SimpleNamespace(value="backtest")
+    assert s.fw["stop_min_mode"] == "floor"                                   # 回测：研究方案优先
+    monkeypatch.setenv("S03_RESEARCH_OVERRIDES", json.dumps({"risk_per_trade": 0.05}))
+    with pytest.raises(ValueError, match="risk_per_trade"):
+        _ = s.fw
+    monkeypatch.delenv("S03_RESEARCH_OVERRIDES")
+    import subprocess                                                         # 旧环境变量不再影响任何运行模式
+    r = subprocess.run([sys.executable, "-c", "import framework_base as F; print(F.FW_DEFAULTS['stop_min_mode'], "
+                        "F.FW_DEFAULTS['better_fill_policy'], F.FW_DEFAULTS['research_entry_delay_bars'])"],
+                       capture_output=True, text=True, cwd=ROOT / "user_data" / "strategies", timeout=120,
+                       env={**os.environ, "S03_STOP_MIN_MODE": "floor", "S03_BETTER_FILL_POLICY": "exit", "S03_ENTRY_DELAY_BARS": "3"})
+    assert r.stdout.split() == ["skip", "widen", "0"], r.stderr
+
+
+# ------------------------------------------------------------------ v2.10：外部审查 v2.9
+def _closed(reason, minutes_ago, profit=-0.01):
+    return SimpleNamespace(exit_reason=reason, close_date_utc=NOW - timedelta(minutes=minutes_ago), close_profit=profit)
+
+
+def test_framework_stop_exits_count_toward_the_stop_guard():
+    """审查 v2.9 P1-2：StoplossGuard 只认 freqtrade 自己的止损原因，fw_stop_crossed / fw_invalid_stop 不计数。"""
+    six = [_closed("fw_stop_crossed", 30 * i) for i in range(3)] + [_closed("stop_loss", 100 + 30 * i) for i in range(3)]
+    s = strat(closed_trades=six)
+    assert s._stop_guard_reason(NOW) and "框架离场 3 次" in s._stop_guard_reason(NOW)
+    assert s.confirm_trade_entry("BTC/USDT:USDT", "limit", 1, 100.0, "GTC", NOW, tag(99.0), "long") is False
+    assert strat(closed_trades=six[:5])._stop_guard_reason(NOW) is None                      # 5 次：不触发
+    assert strat(closed_trades=six)._stop_guard_reason(NOW + timedelta(days=1, minutes=1)) is None   # 暂停 1 天后解除
+    wins = [_closed("fw_stop_crossed", 30 * i, profit=0.01) for i in range(6)]
+    assert strat(closed_trades=wins)._stop_guard_reason(NOW) is None                         # 盈利离场不计
+    plain = [_closed("stop_loss", 30 * i) for i in range(6)]
+    assert strat(closed_trades=plain)._stop_guard_reason(NOW) is None                        # 纯 freqtrade 原因交给 StoplossGuard
+    assert F.is_stop_exit("fw_invalid_stop:no_plan") and not F.is_stop_exit("roi")
+    assert s.protections[0]["trade_limit"] == 6
+
+
+def test_initial_risk_is_recorded_when_the_stop_is_bound():
+    s = strat()
+    amount, _ = sized_amount(s, 100.0, 99.0)
+    t = real_trade("filled", qty=amount, enter_tag=tag(99.0))
+    s._bind_stop(t)
+    assert abs(t.get_custom_data("fw_init_risk") - amount * 1.0) < 1e-9
+
+
+
+def test_backtest_writes_initial_risk_records(tmp_path, monkeypatch):
+    """审查 v2.10 P1-2：回测导出不带 custom data；框架在回测里把每笔的初始风险写进旁路文件。"""
+    log = tmp_path / "risk.jsonl"
+    monkeypatch.setenv("S03_RISK_LOG", str(log))
+    s = strat({"stop_max_pct": 5.0})
+    s.dp.runmode = SimpleNamespace(value="backtest")
+    amount, _ = sized_amount(s, 100.0, 96.0)
+    t = real_trade("filled", qty=amount, enter_tag=tag(96.0))
+    s._bind_stop(t)
+    bad = real_trade("filled", qty=amount, enter_tag=tag(99.0), price=98.5)      # 下单 100、跳空成交在止损之下：无效
+    bad.open_rate_requested = 100.0
+    s._bind_stop(bad)
+    recs = [json.loads(x) for x in log.read_text().splitlines()]
+    assert len(recs) == 2 and abs(recs[0]["init_risk"] - amount * 4.0) < 1e-9 and recs[0]["stop_max_pct"] == 5.0
+    assert recs[1]["invalid"] == "stop_not_below_fill" and abs(recs[1]["init_risk"] - amount * 1.0) < 1e-9   # 按下单时的风险预算
+    s.dp.runmode = SimpleNamespace(value="dry_run")                               # 实盘 / dry-run 不写
+    s._bind_stop(real_trade("filled", qty=amount, enter_tag=tag(96.0)))
+    assert len(log.read_text().splitlines()) == 2

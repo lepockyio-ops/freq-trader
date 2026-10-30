@@ -33,7 +33,8 @@ DEFAULT_GATES: dict[str, Any] = {
     "min_trades": 30,            # 少于此数 → 证据不足，不做检验
     "pass_min_trades": 100,      # 判“通过”至少需要的笔数（G1：≥ 100 笔；30–99 笔最多判“证据不足”）
     "holdout_min_trades": 10,    # 样本外段至少的笔数
-    "holdout_min_frac": 0.2,     # 样本外段至少占全部时间跨度的比例（G2 写的是“最后 30%”，这里留余量，示例值）
+    "holdout_min_frac": 0.2,     # 样本外段占回测区间的比例下限（G2：目标约 30%，允许 20%–50%，示例值；理由见 STRATEGY_TEMPLATE G2）
+    "holdout_max_frac": 0.5,     # 上限：样本内（用来想出和调整策略的部分）至少留一半
     "block_freq": "W",           # 按时间块（周）汇总 R 再做 Bootstrap：同时持仓、行情聚集时比逐笔 Bootstrap 保守
     "confidence": 0.95,          # 置信水平
     "boot_lower_R": 0.0,         # 期望 R 的 Bootstrap 区间下限必须 > 此值
@@ -351,39 +352,72 @@ def _safe_sharpe(x, ddof):
 ENTRY_COLS = ("entry_time", "open_date", "open_time")
 
 
+def _ts(x) -> pd.Timestamp | None:
+    if x is None or x == "":
+        return None
+    t = pd.Timestamp(x)
+    return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+
+
 def holdout_check(trades: pd.DataFrame, holdout_start: str | None, registered: bool, time_col: str,
-                  g: dict) -> dict[str, Any]:
+                  g: dict, data_start=None, data_end=None) -> dict[str, Any]:
     """样本外段（v2.7）：按**入场时间**归属。切分日之前入场、之后平仓的跨边界持仓两边都不算，单独报告笔数。
     只有在想法登记簿里、回测之前登记的起点才算数（registered=True），否则判“无法判定”。
-    同时检查样本外段大约是最后一段：时间跨度占全部样本的比例不低于 holdout_min_frac。"""
+    区间（v2.8，外部审查 v2.7 P1-5）：起点必须严格落在回测区间 [data_start, data_end] 之内（没给区间时用交易的首尾时间），
+    样本外段占区间的比例在 holdout_min_frac–holdout_max_frac 之间；v2.7 起点早于数据开始时比例 > 1 也能通过。"""
     if not holdout_start:
         return {"pass": None, "note": "未登记样本外段（idea holdout --id … --start …，必须在回测之前）"}
     ecol = next((c for c in ENTRY_COLS if c in trades), None)
     if ecol is None or time_col not in trades:
         return {"pass": None, "start": holdout_start, "error": "逐笔文件缺少入场时间列，无法按入场时间切分样本外段"}
-    start = pd.Timestamp(holdout_start)
-    start = start.tz_localize("UTC") if start.tzinfo is None else start.tz_convert("UTC")
+    start = _ts(holdout_start)
     ent = pd.to_datetime(trades[ecol], utc=True)
     ext = pd.to_datetime(trades[time_col], utc=True)
     after = (ent >= start).to_numpy()
     straddle = ((ent < start) & (ext >= start)).to_numpy()
     ho = _clean(trades.loc[after, "R"])
-    span = (ext.max() - ent.min()).total_seconds()
-    frac = float((ext.max() - start).total_seconds() / span) if span > 0 else 0.0
+    lo = _ts(data_start) or ent.min()
+    hi = _ts(data_end) or ext.max()
+    span = (hi - lo).total_seconds()
+    frac = float((hi - start).total_seconds() / span) if span > 0 else 0.0
     out = {"start": holdout_start, "registered": registered, "n": int(ho.size), "n_straddle_excluded": int(straddle.sum()),
-           "holdout_time_frac": round(frac, 3)}
+           "holdout_time_frac": round(frac, 3), "range": [str(lo), str(hi)]}
     if not registered:
-        return {**out, "pass": None, "error": "样本外起点没有在想法登记簿里事先登记：只能作参考"}
+        return {**out, "pass": None, "error": "样本外起点没有在想法登记簿里事先登记（或登记晚于回测）：只能作参考"}
+    if not (lo < start < hi):
+        return {**out, "pass": None, "error": f"样本外起点 {holdout_start} 不在回测区间 {lo:%Y-%m-%d}–{hi:%Y-%m-%d} 之内"}
     if frac < g["holdout_min_frac"]:
-        return {**out, "pass": None, "error": f"样本外段只占时间跨度的 {frac:.0%}，少于 {g['holdout_min_frac']:.0%}"}
+        return {**out, "pass": None, "error": f"样本外段只占回测区间的 {frac:.0%}，少于 {g['holdout_min_frac']:.0%}"}
+    if frac > g.get("holdout_max_frac", 1.0):
+        return {**out, "pass": None, "error": f"样本外段占回测区间的 {frac:.0%}，超过 {g['holdout_max_frac']:.0%}：样本内太短"}
     if ho.size < g["holdout_min_trades"]:
         return {**out, "pass": None, "error": f"样本外段只有 {ho.size} 笔 < {int(g['holdout_min_trades'])} 笔"}
     return {**out, "pass": float(ho.mean()) > 0, "mean_R": round(float(ho.mean()), 4)}
 
 
+def risk_coverage(trades: pd.DataFrame, pnl_col: str = "pnl") -> dict[str, Any]:
+    """逐笔 R 的证据清点（v2.11，外部审查 v2.10 P0）：总笔数、R 有效笔数、R 未知笔数与未知部分的净盈亏。
+    R 未知（初始风险无法确认）的交易不能被静默排除：R 类检验只用得上有效 R，未知部分的亏损会消失。"""
+    n = int(len(trades))
+    r = pd.to_numeric(trades["R"], errors="coerce") if "R" in trades else pd.Series(np.nan, index=trades.index)
+    unknown = ~np.isfinite(r.to_numpy(float)) if n else np.array([], bool)
+    pnl = pd.to_numeric(trades[pnl_col], errors="coerce") if pnl_col in trades else None
+    return {"n_total": n, "n_r_known": int(n - unknown.sum()), "n_r_unknown": int(unknown.sum()),
+            "unknown_pnl": round(float(pnl[unknown].sum()), 4) if pnl is not None and n else None,
+            "total_pnl": round(float(pnl.sum()), 4) if pnl is not None and n else None}
+
+
+def _coverage_check(cov: dict) -> dict[str, Any]:
+    if cov["n_r_unknown"]:
+        return {"pass": None, **cov, "error": f"初始风险未知 {cov['n_r_unknown']} 笔（净盈亏 {cov['unknown_pnl']}）："
+                                              "这些交易无法计入 R 类检验，不能证明结论包含了它们"}
+    return {"pass": True, **cov}
+
+
 def evaluate_trades(trades: pd.DataFrame, risk_fraction: float = 0.005, n_trials: int = 1,
                     trial_sharpe_std: float | None = None, gates: dict | None = None, time_col: str = "time",
-                    seed: int = 42, holdout_start: str | None = None, holdout_registered: bool = False) -> dict[str, Any]:
+                    seed: int = 42, holdout_start: str | None = None, holdout_registered: bool = False,
+                    data_start=None, data_end=None) -> dict[str, Any]:
     """对一组逐笔交易（列 R、平仓时间 time_col、入场时间 entry_time）跑全部检验，给出“通过 / 不通过 / 证据不足”。
     判定：任一必需检验不通过 → 不通过；任一必需检验无法判定 → 证据不足；笔数 < pass_min_trades（100）→ 证据不足；其余 → 通过。
     必需检验：Bootstrap 期望 R、按时间块 Bootstrap、分段一致性、Deflated Sharpe、样本外段（按入场时间、须事先登记）。
@@ -391,9 +425,11 @@ def evaluate_trades(trades: pd.DataFrame, risk_fraction: float = 0.005, n_trials
     n_trials：为了得到这条策略总共试过多少种方案（含想法登记簿里回测过的想法）；只试过 1 种时 DSR 退化为 PSR。"""
     g = {**DEFAULT_GATES, **(gates or {})}
     r = _clean(trades["R"]) if "R" in trades else np.array([])
-    out: dict[str, Any] = {"n_trades": int(r.size), "gates": g, "gate_label": "示例值（未经数据验证）"}
+    cov = risk_coverage(trades)
+    out: dict[str, Any] = {"n_trades": int(r.size), "coverage": cov, "gates": g, "gate_label": "示例值（未经数据验证）"}
     if r.size < g["min_trades"]:
-        out.update(verdict="证据不足", reason=f"交易 {r.size} 笔 < {int(g['min_trades'])} 笔")
+        out.update(verdict="证据不足", reason=f"交易 {r.size} 笔 < {int(g['min_trades'])} 笔" +
+                   (f"（另有初始风险未知 {cov['n_r_unknown']} 笔）" if cov["n_r_unknown"] else ""))
         if r.size >= 5:
             out["bootstrap_mean_R"] = bootstrap_mean_ci(r, confidence=g["confidence"], seed=seed)
         return out
@@ -430,7 +466,8 @@ def evaluate_trades(trades: pd.DataFrame, risk_fraction: float = 0.005, n_trials
     else:
         checks["deflated_sharpe"] = {"pass": None, "note": "尝试 ≥ 2 次但缺各方案 Sharpe 离散度：无法折扣"}
 
-    checks["holdout"] = holdout_check(trades, holdout_start, holdout_registered, time_col, g)
+    checks["holdout"] = holdout_check(trades, holdout_start, holdout_registered, time_col, g, data_start, data_end)
+    checks["risk_known"] = _coverage_check(cov)              # 任何一笔初始风险未知 → 证据不足（不能填 0，也不能静默排除）
 
     out["sharpe"] = info
     out["bootstrap_sharpe"] = bootstrap_sharpe_ci(r, confidence=g["confidence"], seed=seed)
@@ -450,6 +487,14 @@ def evaluate_trades(trades: pd.DataFrame, risk_fraction: float = 0.005, n_trials
 
 
 STOP_EXITS = ("stop_loss", "stoploss_on_exchange", "trailing_stop_loss", "liquidation", "stop")
+# 框架以 custom_exit 发出的止损类离场（v2.10，外部审查 v2.9 P1-2）：价格穿过止损时引擎还没采用止损、成交后止损无效。
+# 它们同样是市价离场，必须一样扣止损滑点。
+STOP_EXIT_PREFIXES = ("fw_stop_crossed", "fw_invalid_stop")
+
+
+def is_stop_exit(reason) -> bool:
+    r = str(reason or "").lower()
+    return r in STOP_EXITS or r.startswith(STOP_EXIT_PREFIXES)
 
 
 def stop_slip_trades(trades: pd.DataFrame, slip: float) -> pd.DataFrame | None:
@@ -459,8 +504,10 @@ def stop_slip_trades(trades: pd.DataFrame, slip: float) -> pd.DataFrame | None:
     if not need <= set(trades.columns):
         return None
     out = trades.copy()
-    hit = out["exit_reason"].astype(str).str.lower().isin(STOP_EXITS) & (out["risk"] > 0)
+    stop = out["exit_reason"].map(is_stop_exit).astype(bool)
+    hit = stop & (out["risk"] > 0)
     out.loc[hit, "R"] = out.loc[hit, "R"] - slip * out.loc[hit, "notional"] / out.loc[hit, "risk"]
+    out.loc[stop & ~(out["risk"] > 0), "R"] = np.nan        # 止损类离场但风险未知：扣不了滑点，记为未知（v2.11），不能按原 R 放行
     return out
 
 
@@ -471,26 +518,51 @@ def stress_check(name: str, state: dict | None, base_n: int) -> dict[str, Any]:
         return {"variant": name, "pass": None, "state": "missing", "error": "没有运行这个压力方案"}
     if state.get("status") != "ok" or state.get("trades") is None:
         return {"variant": name, "pass": None, "state": "failed", "error": state.get("error") or f"状态 {state.get('status')}"}
+    cov = risk_coverage(state["trades"])
     r = _clean(state["trades"]["R"]) if len(state["trades"]) else np.array([])
+    if cov["n_r_unknown"]:
+        return {"variant": name, "pass": None, "state": "risk_unknown", "n": int(r.size), "coverage": cov,
+                "error": f"初始风险未知 {cov['n_r_unknown']} 笔（净盈亏 {cov['unknown_pnl']}）"}
     if r.size == 0:
         return {"variant": name, "pass": False if base_n > 0 else None, "state": "zero_trades", "n": 0,
                 "error": "压力方案下没有任何交易"}
-    return {"variant": name, "pass": float(r.mean()) > 0, "state": "ok", "n": int(r.size), "mean_R": round(float(r.mean()), 4)}
+    return {"variant": name, "pass": float(r.mean()) > 0, "state": "ok", "n": int(r.size), "mean_R": round(float(r.mean()), 4),
+            "coverage": cov}
+
+
+def pbo_check(pbo: dict | None, g: dict) -> dict[str, Any]:
+    """过拟合概率（v2.8）：pbo = evaluate_trials(...)["pbo"]。算不出来（方案少于 2 个、样本太短、研究矩阵属于旧版本）→ 无法判定。"""
+    v = (pbo or {}).get("pbo")
+    if v is None or not np.isfinite(v):
+        return {"pass": None, "error": (pbo or {}).get("error") or (pbo or {}).get("note") or "没有可用的多方案结果，算不出 PBO"}
+    return {"pass": float(v) < g["pbo"], "pbo": round(float(v), 4), "gate": g["pbo"],
+            **{k: (pbo or {}).get(k) for k in ("n_strategies", "n_splits", "months", "source")}}
 
 
 def final_verdict(base: pd.DataFrame, stresses: dict[str, dict | None], required: Sequence[str], *, holdout_start=None,
                   holdout_registered=False, n_trials: int = 1, trial_sharpe_std: float | None = None,
-                  time_col: str = "time", risk_fraction: float = 0.005) -> dict[str, Any]:
-    """上线判定（v2.7）：只基于组合回测的逐笔记录 + 策略声明的全部必需压力方案。
+                  time_col: str = "time", risk_fraction: float = 0.005, pbo: dict | None = None,
+                  data_start=None, data_end=None, gates: dict | None = None,
+                  candidate_risk_unknown: dict | None = None) -> dict[str, Any]:
+    """上线判定（v2.7 起）：组合回测的逐笔记录 + 策略声明的全部必需压力方案 + 过拟合概率（v2.8）。
     required 由策略声明（freq-trader：FrameworkStrategy.research_stress；hyper-trader：插件的 research_stress），
-    在 plan / portfolio 时写进清单；缺任一方案、方案失败 → 证据不足；零交易 → 不通过。"""
-    base_eval = evaluate_trades(base, risk_fraction, n_trials, trial_sharpe_std, time_col=time_col,
-                                holdout_start=holdout_start, holdout_registered=holdout_registered)
+    在 plan / portfolio 时写进清单；缺任一方案、方案失败 → 证据不足；零交易 → 不通过。
+    pbo 来自研究矩阵里的非压力方案（evaluate_trials）；算不出来 → 证据不足（v2.7 不检查 PBO，外部审查 v2.7 P1-2）。"""
+    g = {**DEFAULT_GATES, **(gates or {})}
+    base_eval = evaluate_trades(base, risk_fraction, n_trials, trial_sharpe_std, gates=g, time_col=time_col,
+                                holdout_start=holdout_start, holdout_registered=holdout_registered,
+                                data_start=data_start, data_end=data_end)
     st = {name: stress_check(name, stresses.get(name), base_eval["n_trades"]) for name in required}
-    parts = {"base": base_eval["verdict"], **{f"stress:{k}": v["pass"] for k, v in st.items()}}
+    pc = pbo_check(pbo, g)
+    # 候选方案的风险完整性（v2.12，外部审查 v2.11 P1）：独立一项，不受任何命令行参数影响
+    cand = {"pass": None if candidate_risk_unknown else True, "risk_unknown": dict(candidate_risk_unknown or {})}
+    if candidate_risk_unknown:
+        cand["error"] = f"候选方案在开发区间有初始风险未知的交易 {dict(candidate_risk_unknown)}：候选比较（DSR、PBO）证据不完整"
+    parts = {"base": base_eval["verdict"], **{f"stress:{k}": v["pass"] for k, v in st.items()}, "pbo": pc["pass"],
+             "candidates_risk_known": cand["pass"]}
     verdict, failed, missing = combine_verdicts(parts)
     return {"verdict": verdict, "failed": failed, "missing": missing, "required_stress": list(required),
-            "base": base_eval, "stress": st}
+            "base": base_eval, "stress": st, "pbo": pc, "candidates_risk_known": cand, "n_trials": n_trials}
 
 
 def combine_verdicts(parts: dict[str, str | bool | None]) -> tuple[str, list[str], list[str]]:
@@ -524,4 +596,79 @@ def evaluate_trials(per_trial: dict[str, pd.DataFrame], time_col: str = "time", 
             out["pbo"] = {"error": str(e), "months": len(mat)}
     else:
         out["pbo"] = {"note": "方案少于 2 个，不计算 PBO"}
+    return out
+
+
+def portfolio_trials(per_trial: dict[str, pd.DataFrame], start=None, end=None, dev_end=None, freq: str = "W-MON",
+                     pnl_col: str = "pnl", time_col: str = "time", entry_col: str = "entry_time") -> dict[str, Any]:
+    """候选方案的 PBO 与 Sharpe 离散度（v2.10，外部审查 v2.9 P2-2）：数据来自**组合回测**（同一币池、同一连续区间、
+    同一起始权益、同一执行规则的共享账户），不是单币 × 单年矩阵。
+    - 只用开发区间：入场与平仓都在 dev_end（登记的样本外起点）之前的交易；样本外段不参与候选比较。
+    - 每个候选按统一的周网格汇总已实现盈亏（按平仓时间，含手续费与资金费）；没有交易的周记 0（真实结果）。
+      数据缺口不在这里补零：上线判定另有数据缺口检查，有缺口最多判“证据不足”。
+    - 限制：freqtrade 回测导出只有已平仓交易，收益按平仓时间计，不含持仓期间的浮动盈亏。
+    返回 {"pbo": {...}, "n_trials", "trial_sharpe_std", "trials", "dev_range"}。"""
+    out: dict[str, Any] = {"n_trials": len(per_trial), "trials": {}, "trial_sharpe_std": None}
+    lo = _ts(start)
+    hi = _ts(dev_end) or _ts(end)
+    cols, sharpes = {}, []
+    for name, df in per_trial.items():
+        d = df.copy()
+        ct = pd.to_datetime(d[time_col], utc=True)
+        et = pd.to_datetime(d[entry_col], utc=True) if entry_col in d else ct
+        keep = pd.Series(True, index=d.index)
+        if dev_end is not None:
+            keep &= (et < _ts(dev_end)) & (ct < _ts(dev_end))
+        d, ct = d[keep], ct[keep]
+        r = _clean(d["R"]) if "R" in d and len(d) else np.array([])
+        unknown_n = int(len(d) - r.size) if "R" in d else int(len(d))
+        if unknown_n:
+            out.setdefault("risk_unknown", {})[name] = unknown_n
+        sh = _safe_sharpe(r, 1) if r.size >= 2 else float("nan")
+        if np.isfinite(sh):
+            sharpes.append(sh)
+        out["trials"][name] = {"n_trades_dev": int(len(d)), "sharpe_per_trade": round(sh, 4) if np.isfinite(sh) else None,
+                               "pnl_dev": round(float(d[pnl_col].sum()), 4) if len(d) else 0.0}
+        cols[name] = pd.Series(d[pnl_col].to_numpy(float), index=ct)
+    if len(sharpes) >= 2 and not out.get("risk_unknown"):      # 候选有未知 R 时离散度不可信 → DSR 无法判定
+        out["trial_sharpe_std"] = round(float(np.std(sharpes, ddof=1)), 4)
+    lo = lo or min((c.index.min() for c in cols.values() if len(c)), default=None)
+    hi = hi or max((c.index.max() for c in cols.values() if len(c)), default=None)
+    out["dev_range"] = [str(lo), str(hi)]
+    if len(per_trial) < 2:
+        out["pbo"] = {"error": f"组合回测的候选方案只有 {sorted(per_trial)}：PBO 至少需要 2 个"}
+        return out
+    if lo is None or hi is None or hi <= lo:
+        out["pbo"] = {"error": "开发区间内没有交易，算不出 PBO"}
+        return out
+    # 周期边界（v2.11，外部审查 v2.10 P1-1）：第一个边界取开始日所在周的周一（向前取整），最后一个边界在结束时刻之后，
+    # 左闭右开。v2.10 从开始日之后的第一个周一起算，开头不满一周的交易落不进任何一格、被丢掉。
+    start_edge = (lo.normalize() - pd.Timedelta(days=lo.weekday())) if freq.startswith("W") else lo.normalize()
+    edges = pd.date_range(start_edge, hi + pd.Timedelta("7D"), freq=freq, tz="UTC")
+    if len(edges) < 3:
+        out["pbo"] = {"error": "开发区间太短（不足 2 个周期）"}
+        return out
+    grid = edges[:-1]
+    mat, mism = {}, []
+    for k, v in cols.items():
+        if not len(v):
+            mat[k] = pd.Series(0.0, index=grid)
+            continue
+        bins = pd.cut(v.index, edges, right=False)
+        agg = pd.Series(v.to_numpy(), index=bins).groupby(level=0, observed=False).sum()
+        agg.index = edges[:-1][: len(agg)]
+        mat[k] = agg.reindex(grid, fill_value=0.0)
+        if abs(float(mat[k].sum()) - float(v.sum())) > 1e-6 * max(1.0, abs(float(v.sum()))) or bins.isna().any():
+            mism.append(k)
+    if mism:                                                  # 分箱前后盈亏必须守恒
+        out["pbo"] = {"error": f"周网格汇总后盈亏不守恒：{mism}"}
+        return out
+    mat = pd.DataFrame(mat).fillna(0.0)
+    ns = max(4, min(16, (len(mat) // 2) // 2 * 2))
+    try:
+        p = probability_of_backtest_overfitting(mat, ns)
+        out["pbo"] = {**asdict(p), "periods": len(mat), "freq": freq,
+                      "source": "组合回测（共享账户、只用开发区间、按平仓时间的已实现盈亏；不含浮动盈亏）"}
+    except ValueError as e:
+        out["pbo"] = {"error": str(e), "periods": len(mat)}
     return out
