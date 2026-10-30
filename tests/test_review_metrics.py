@@ -12,3 +12,13 @@ def test_r_uses_entry_fill_amount_after_partial_exits():
     rows = from_freqtrade([t, {**t, "is_open": True}])
     assert len(rows) == 1 and rows[0]["r"] == 3.0          # 60 / (10 × 2)
     assert compute(rows)["by_coin"]["SOL"]["expectancy_r"] == 3.0
+
+
+def test_total_streak_uses_account_close_order():
+    """审查 P2：合计先按币分组再拼接，真实 2 连亏被报告成 1。"""
+    trs = [{"coin": "BTC", "close_time": "2026-01-01", "r": -1, "pnl": -1, "exit_reason": "sl"},
+           {"coin": "ETH", "close_time": "2026-01-02", "r": -1, "pnl": -1, "exit_reason": "sl"},
+           {"coin": "BTC", "close_time": "2026-01-03", "r": 1, "pnl": 1, "exit_reason": "tp"},
+           {"coin": "ETH", "close_time": "2026-01-04", "r": 1, "pnl": 1, "exit_reason": "tp"}]
+    m = compute(trs)
+    assert m["total"]["max_consecutive_losses"] == 2 and m["by_coin"]["BTC"]["max_consecutive_losses"] == 1

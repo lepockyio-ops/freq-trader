@@ -68,6 +68,8 @@ def test_freqtrade_backtest_smoke(tmp_path, strategy, path, expect_trades):
            "--backtest-directory", str(tmp_path)]
     if path:
         cmd += ["--strategy-path", path]
+    if os.environ.get("S03_FT_EXTRA_CONFIG"):                       # 本机专属设置（如代理证书）放在仓库外
+        cmd += ["-c", os.environ["S03_FT_EXTRA_CONFIG"]]
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, env={**os.environ, "S03_EVENTS_REQUIRED": "0"})
     assert r.returncode == 0, r.stderr[-2000:]
     from freqtrade.data.btanalysis import load_backtest_data
@@ -78,8 +80,10 @@ def test_freqtrade_backtest_smoke(tmp_path, strategy, path, expect_trades):
         return
     assert len(t) > 0
     init = t.groupby("trade_id").first() if "trade_id" in t else t
-    # 框架止损按价格挂出（stop_loss_abs）；护栏按“计划入场价”（fw_entry_cap）检查，实际成交价不高于它，
-    # 所以按成交价算的止损距离可略小于 0.8%，但不会小于 0.8% − 限价偏移 0.1%
+    # v2.6：止损随订单绑定，按成交价检查；距离必须在 0.8%–3%（成交价更优时放宽到 0.8%）
     stop_pct = (init["open_rate"] - init["stop_loss_abs"]) / init["open_rate"] * 100
-    assert ((stop_pct >= 0.7 - 1e-6) & (stop_pct <= 3.0 + 1e-6)).all()
+    assert ((stop_pct >= 0.8 - 1e-6) & (stop_pct <= 3.0 + 1e-6)).all(), stop_pct.tolist()
     assert (init["initial_stop_loss_abs"] < init["stop_loss_abs"]).all()   # initial 是兜底的 −99%，不是策略止损
+    assert init["enter_tag"].str.startswith("fw|").all()                   # 计划随订单保存
+    # 周期以策略为准（15m）：入场发生在 15 分钟 K 线的开盘时刻，说明配置没有把它改成 1m
+    assert (pd.to_datetime(init["open_date"]).dt.minute % 15 == 0).all()

@@ -8,7 +8,7 @@
   s03ft logs freqtrade|monitor|gate           最近 200 行日志
   s03ft gate status | gate pause <原因>       白名单代理：查看状态 / 暂停新开仓
   s03ft events build --out FILE [--history]   从美联储、BLS、BEA 官方日程生成事件文件
-  s03ft research plan|run|verify|aggregate|g0 [参数…]   研究矩阵（freqtrade 回测）
+  s03ft research plan|run|verify|aggregate|portfolio|g0 [参数…]   研究矩阵与组合回测（freqtrade）
   s03ft lab factors|stats|matrix|idea [参数…]  研究前端：筛因子、统计检验、想法登记簿（docs/RESEARCH_LAB.md）
   s03ft lab vt-check [--vt-bin DIR]           Vibe-Trading 安装自检（默认 /opt/s03/vt-venv/bin）
   s03ft lab news check|blocks|daily|backfill|replay …  新闻（Odaily + BlockBeats）：自检、当前守卫、每日汇总、历史回填、守卫回放
@@ -215,6 +215,15 @@ def cmd_doctor(a) -> int:
     add("策略文件存在", info["file"] is not None, info.get("file") or f"找不到策略 {info['name']}")
     add("已配置自己的策略（不是空白模板）", info["file"] is not None and not info["is_template"],
         "仍是空白模板：不会产生任何入场，见 docs/STRATEGY_TEMPLATE.md" if info["is_template"] else info["name"])
+    # 周期只能由策略决定：配置里的 timeframe 会覆盖策略（freqtrade 规定配置优先），v2.5 之前的配置写死了 1m
+    cfg_files = [HOME / "user_data" / "config.json"] if a.research else [Path("/etc/s03/ft-config.json")]
+    for cf in cfg_files:
+        try:
+            tf = json.loads(cf.read_text("utf-8")).get("timeframe")
+        except (OSError, ValueError):
+            continue
+        add(f"{cf.name} 没有写 timeframe（周期以策略为准）", tf is None,
+            f"配置写了 timeframe = {tf}，会覆盖策略里的周期：删掉这一行" if tf else "")
     for f in ("monitor/events_calendar.py", "monitor/run_monitor.py", "research/matrix.py"):
         add(f"{f} 存在", (HOME / f).exists())
     if not a.research:
@@ -375,7 +384,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--history", action="store_true")
     p.set_defaults(fn=cmd_events)
     p = sub.add_parser("research")
-    p.add_argument("sub", choices=["plan", "run", "verify", "aggregate", "g0"])
+    p.add_argument("sub", choices=["plan", "run", "verify", "aggregate", "portfolio", "g0"])
     p.add_argument("args", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_research)
     p = sub.add_parser("lab")

@@ -1,4 +1,4 @@
-# freq-trader：freqtrade 自动交易框架（Binance USDⓈ-M 永续 · 模板版 v2.5 · 策略留空）
+# freq-trader：freqtrade 自动交易框架（Binance USDⓈ-M 永续 · 模板版 v2.6 · 策略留空）
 
 这是一个基于 [freqtrade](https://www.freqtrade.io/) 2026.9、**不含交易策略的框架**，交易规则由你写成一个继承 `FrameworkStrategy` 的策略接入。框架已经提供：
 
@@ -36,7 +36,7 @@
 | 能做 | 不能做 / 不会做 |
 |---|---|
 | 把你的交易规则变成 freqtrade 策略，回测、dry-run、实盘用同一份代码 | 替你想出能赚钱的策略；示例策略 `SmaCrossExample` 只用来验证框架能跑通 |
-| 对任何策略强制执行风控：止损距离 0.8–3%、单笔风险、总风险、强平距离 ≥ 3 倍止损、相关性、事件窗口、最长持有 | 让策略绕过这些风控 |
+| 对任何策略执行风控（策略不覆盖框架回调时）：止损随订单绑定、止损距离 0.8–3%、单笔风险、总风险（含挂单）、强平距离 ≥ 3 倍止损、相关性、事件窗口、最长持有；检查出错一律拒绝入场。保证范围与已知缺口见 `docs/FRAMEWORK.md`、`docs/REFERENCE.md` | 让策略绕过这些风控；保证回测与实盘成交一致 |
 | 研究前端：登记想法 → 筛因子（跨币种比较）→ 研究矩阵 → 统计检验（Deflated Sharpe、PBO 等） | 把统计检验“通过”当作收益保证 |
 | 由 OpenClaw agent 通过统一命令 `s03ft` 运维、研究、复盘 | 让 agent 接触交易所密钥、改配置、恢复交易或关闭 dry_run |
 
@@ -113,8 +113,8 @@ freqtrade backtesting -c $S03_FT_CONFIG --strategy SmaCrossExample --strategy-pa
 ## 6. 从想法到上线的完整流程
 
 ```
-登记想法 → 筛因子 → 写成策略 → G0 偏差检查 → 研究矩阵 → 统计检验 → 你批准 → dry-run ≥ 4 周 → 你关闭 dry_run（小额）
- lab idea   lab factors          research g0    research run  lab matrix  idea move    s03-freqtrade
+登记想法 → 筛因子 → 写成策略 → G0 偏差检查 → 组合回测 + 研究矩阵 → 统计检验 → 你批准 → dry-run ≥ 4 周 → 你关闭 dry_run（小额）
+ lab idea   lab factors          research g0    research portfolio/run  lab stats/matrix  idea move   s03-freqtrade
 ```
 
 ```bash
@@ -124,14 +124,17 @@ s03ft lab idea add --title "…" --hypothesis "…" --mechanism "…" --falsific
 # ② 筛因子（5 个币，跨币种比较；只有 alive / reversed 且 FDR 显著才算候选）
 s03ft lab factors --tf 1d --horizon 3
 
-# ③ 写成策略后：偏差检查 + 研究矩阵（逐笔 R 另存 research/results/trades/）
+# ③ 写成策略后：偏差检查 + 组合回测（主证据）+ 研究矩阵（诊断；逐笔 R 另存 research/results/trades/）
 s03ft research g0 --timerange 20250101-
-s03ft research plan --pairs BTC,ETH,SOL,BNB,HYPE --years 2023-2025 --variants base,stop_floor,cost2x
+s03ft events build --out research/events_history.json --history   # 回测用的历史事件
+s03ft research portfolio --variant base --timerange 20220101-     # 五币同时、连续时间、共享余额
+s03ft research plan --pairs BTC,ETH,SOL,BNB,HYPE --years 2023-2025 --variants base,stop_floor,cost2x,delay1
 s03ft research run --job BTC-2024-base             # 对 research/jobs.json 里每一格执行
-s03ft research aggregate
+s03ft research aggregate                           # 只汇总清单里、当前版本、成功的任务
 
-# ④ 统计检验：期望 R 区间、符号翻转、滚动分段、Deflated Sharpe、PBO、成本压力
-s03ft lab matrix
+# ④ 统计检验：Bootstrap、按周 Bootstrap、分段一致性、Deflated Sharpe、PBO、样本外段、压力方案
+s03ft lab stats --trades research/results/portfolio/base.csv --holdout-start 2025-01-01
+s03ft lab matrix --holdout-start 2025-01-01
 
 # ⑤ 批准（只能由你在终端执行；s03ft 会拒绝 --by human）
 python -m fwresearch idea move --id I-… --to approved --reason "已审阅报告" --by human --approver <你的名字>
@@ -199,7 +202,7 @@ sudo -u openclaw s03ft doctor
 | 自检 / 状态 / 每日例行 | `s03ft doctor` / `s03ft status` / `s03ft daily` |
 | 启停服务 | `s03ft svc start|stop|restart freqtrade|monitor|gate` |
 | 暂停新开仓（恢复只能由你在 FreqUI 或 API 操作） | `s03ft gate pause "原因"` |
-| 研究矩阵 / 偏差检查 | `s03ft research plan|run|aggregate|verify|g0` |
+| 组合回测 / 研究矩阵 / 偏差检查 | `s03ft research portfolio` / `s03ft research plan|run|aggregate|verify` / `s03ft research g0` |
 | 筛因子 / 统计检验 / 想法 | `s03ft lab factors` / `s03ft lab matrix` / `s03ft lab idea list` |
 | Vibe-Trading 自检 | `s03ft lab vt-check` |
 | 复盘指标 | `s03ft metrics` |
@@ -215,7 +218,11 @@ sudo -u openclaw s03ft doctor
 | 截面样本从 2025-02 才开始 | HYPE 永续 2025-02-21 才在 OKX 上市，跨币种比较只用 5 个币**同时**有数据的日期 |
 | 因子显示 `insufficient` | IC 观测太少（截面 < 60、时间序列 < 12 个月）。资金费因子常见：OKX 只能下载约 3 个月资金费率 |
 | 所有因子都是 dead | 不到两年的数据、5 个高度相关的币，本来就很难有显著结论。不要为了出结果去调阈值 |
-| `lab matrix` 报“没有逐笔文件” | 先 `s03ft research run --job …`；逐笔 R 保存在 `research/results/trades/` |
+| `lab matrix` 报“没有逐笔文件” | 先 `s03ft research plan` 再 `run --job …`；只读清单里、当前版本、成功的任务（被排除的会列在 stderr） |
+| 统计结论总是“证据不足” | 笔数 < 100、没给 `--holdout-start`、缺压力方案或缺 DSR 数据时都会这样，按报告里列出的缺项补齐；不要降低门槛 |
+| dry-run 一直不开仓，日志“事件日历不可用” | 实盘默认要求事件日历：先 `systemctl start s03-events`；本地研究副本可设 `S03_EVENTS_REQUIRED=0` |
+| 交易以 `fw_invalid_stop:…` 离场 | 成交后止损无效（止损不低于成交价、超出上限、风险超预算或没有框架计划）：框架立即离场，原因写在日志 |
+| `s03ft doctor` 提示配置写了 timeframe | 删掉配置里的 `timeframe`：它会覆盖策略周期（v2.5 及以前的配置写死了 1m） |
 | 某个币突然不再开新仓，日志里有 `news_block` | 新闻事件守卫（Odaily / BlockBeats）命中了这个币或交易所的重大事件（时长见 `docs/RESEARCH_LAB.md`）。用 `lab news blocks` 查看原因和到期时间；不要为了恢复交易去改规则 |
 | 守卫状态是 `stale` | 采集定时器 30 分钟没有更新（Key 失效、限额或网络）。交易程序已自动忽略守卫，修好采集后自动恢复 |
 | `openclaw` 提示 Node 版本不支持 | 2026.10.8 需要 Node ≥ 24.22.1 或 ≥ 26.12.1 |
@@ -232,6 +239,6 @@ sudo -u openclaw s03ft doctor
 | [`docs/STRATEGY_TEMPLATE.md`](docs/STRATEGY_TEMPLATE.md) | 策略规格填写模板（含验证门槛 G0–G9） |
 | [`docs/RESEARCH_LAB.md`](docs/RESEARCH_LAB.md) | 研究前端：流程、统计检验、因子口径、Vibe-Trading 安装验证记录 |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | 文件清单、已验证项、监控告警、已知问题 |
-| [`docs/manual-freqtrade.md`](docs/manual-freqtrade.md) | 完整交易流程手册（第 1–16 节） |
+| [`docs/manual-freqtrade.md`](docs/manual-freqtrade.md) | 交易流程手册：框架保证与限制、验证门槛、执行与异常处理、版本记录 |
 | [`deploy/README.md`](deploy/README.md) | 部署细节与上线前演练 |
 | [`fwresearch/NOTICE.md`](fwresearch/NOTICE.md) | 移植代码的来源与许可（Vibe-Trading，MIT） |

@@ -9,7 +9,6 @@
     "trading_mode": "futures",
     "margin_mode": "isolated",
     "liquidation_buffer": 0.05,
-    "timeframe": "1m",
     "strategy": "MyStrategy",
     "cancel_open_orders_on_exit": false,
     "unfilledtimeout": {
@@ -37,7 +36,8 @@
         "force_entry": "market",
         "stoploss": "market",
         "stoploss_on_exchange": true,
-        "stoploss_on_exchange_interval": 60
+        "stoploss_on_exchange_interval": 60,
+        "stoploss_price_type": "mark"
     },
     "exchange": {
         "name": "okx",
@@ -50,14 +50,7 @@
             "BNB/USDT:USDT",
             "HYPE/USDT:USDT"
         ],
-        "pair_blacklist": [],
-        "ccxt_config": {
-            "cafile": "/root/.ccr/ca-bundle.crt"
-        },
-        "ccxt_async_config": {
-            "aiohttp_trust_env": true,
-            "cafile": "/root/.ccr/ca-bundle.crt"
-        }
+        "pair_blacklist": []
     },
     "pairlists": [
         {
